@@ -1,16 +1,20 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include "ClientGameplay.h"
 #include "gameLayer.h"
+
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtx/transform.hpp>
+
 #include "platformInput.h"
 #include "imgui.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <sstream>
+
 #include "imfilebrowser.h"
 #include <gl2d/gl2d.h>
 #include <platformTools.h>
@@ -73,6 +77,7 @@ namespace
 #define playerPaintBrushRadius gameplay().playerPaintBrushRadius
 #define playerPaintBrushRadiusPrecise gameplay().playerPaintBrushRadiusPrecise
 #define playerPaintColorHsv gameplay().playerPaintColorHsv
+#define paintColorPickModeActive gameplay().paintColorPickModeActive
 #define paintColorUiHovered gameplay().paintColorUiHovered
 #define paintColorUiCapturingMouse gameplay().paintColorUiCapturingMouse
 #define paintUiFontLoaded gameplay().paintUiFontLoaded
@@ -90,8 +95,6 @@ extern "C"
 	__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = USE_GPU;
 }
 #pragma endregion
-
-
 
 glm::vec2 consumeLookDelta(glm::vec2 &lastMousePos, bool captureMouse)
 {
@@ -174,6 +177,41 @@ glm::vec3 hsvToRgb(glm::vec3 hsv)
 	return rgb + glm::vec3(match);
 }
 
+glm::vec3 rgbToHsv(glm::vec3 rgb)
+{
+	rgb = glm::clamp(rgb, glm::vec3(0.0f), glm::vec3(1.0f));
+
+	const float maxChannel = (std::max)(rgb.r, (std::max)(rgb.g, rgb.b));
+	const float minChannel = (std::min)(rgb.r, (std::min)(rgb.g, rgb.b));
+	const float delta = maxChannel - minChannel;
+
+	float hue = 0.0f;
+	if (delta > 0.00001f)
+	{
+		if (maxChannel == rgb.r)
+		{
+			hue = std::fmod((rgb.g - rgb.b) / delta, 6.0f);
+		}
+		else if (maxChannel == rgb.g)
+		{
+			hue = ((rgb.b - rgb.r) / delta) + 2.0f;
+		}
+		else
+		{
+			hue = ((rgb.r - rgb.g) / delta) + 4.0f;
+		}
+
+		hue /= 6.0f;
+		if (hue < 0.0f)
+		{
+			hue += 1.0f;
+		}
+	}
+
+	const float saturation = maxChannel > 0.00001f ? (delta / maxChannel) : 0.0f;
+	return {hue, saturation, maxChannel};
+}
+
 gl2d::Color4f toColor4f(glm::vec3 rgb, float alpha = 1.0f)
 {
 	return {rgb.r, rgb.g, rgb.b, alpha};
@@ -243,6 +281,7 @@ void setCameraMode(CameraMode newMode)
 	else
 	{
 		paintModeActive = false;
+		paintColorPickModeActive = false;
 	}
 
 	cameraMode = newMode;
@@ -433,6 +472,17 @@ gl2d::Rect getPaintColorPanelRect()
 	};
 }
 
+gl2d::Rect getPaintColorPickButtonRect()
+{
+	const gl2d::Rect panel = getPaintColorPanelRect();
+	return {
+		panel.x + 84.0f,
+		panel.y + panel.w - 30.0f,
+		124.0f,
+		22.0f
+	};
+}
+
 gl2d::Rect getPaintColorSliderRect(PaintColorSlider slider)
 {
 	const gl2d::Rect panel = getPaintColorPanelRect();
@@ -487,12 +537,19 @@ void updatePaintColorPicker(platform::Input &input)
 	if (!paintModeActive || cameraMode != CameraMode::ThirdPerson)
 	{
 		activePaintColorSlider = PaintColorSlider::None;
+		paintColorPickModeActive = false;
 		return;
 	}
 
 	const glm::vec2 mousePosition = glm::vec2(getMouseFramebufferPosition(input));
 	const gl2d::Rect panel = getPaintColorPanelRect();
 	paintColorUiHovered = pointInRect(mousePosition, panel);
+
+	if (platform::isButtonPressed(platform::Button::C))
+	{
+		paintColorPickModeActive = !paintColorPickModeActive;
+		activePaintColorSlider = PaintColorSlider::None;
+	}
 
 	if (!input.isLMouseHeld())
 	{
@@ -501,10 +558,17 @@ void updatePaintColorPicker(platform::Input &input)
 
 	if (input.isLMousePressed())
 	{
+		if (pointInRect(mousePosition, getPaintColorPickButtonRect()))
+		{
+			paintColorPickModeActive = !paintColorPickModeActive;
+			activePaintColorSlider = PaintColorSlider::None;
+		}
+
 		for (PaintColorSlider slider : {PaintColorSlider::Hue, PaintColorSlider::Saturation, PaintColorSlider::Value})
 		{
 			if (pointInRect(mousePosition, getPaintColorSliderRect(slider)))
 			{
+				paintColorPickModeActive = false;
 				activePaintColorSlider = slider;
 				break;
 			}
@@ -513,6 +577,7 @@ void updatePaintColorPicker(platform::Input &input)
 
 	if (activePaintColorSlider != PaintColorSlider::None && input.isLMouseHeld())
 	{
+		paintColorPickModeActive = false;
 		const gl2d::Rect sliderRect = getPaintColorSliderRect(activePaintColorSlider);
 		const float sliderValue = (mousePosition.x - sliderRect.x) / sliderRect.z;
 		setPaintColorSliderValue(activePaintColorSlider, sliderValue);
@@ -556,6 +621,64 @@ glm::ivec2 getMouseFramebufferPosition(const platform::Input &input)
 	};
 
 	return paintDebugState.framebufferMousePosition;
+}
+
+bool sampleVisibleScreenColor(glm::ivec2 screenPosition, glm::vec3 &sampledColor)
+{
+	sampledColor = {};
+	constexpr int sampleRadius = 2;
+
+	const glm::ivec2 framebufferSize = platform::getFrameBufferSize();
+	if (framebufferSize.x <= 0 || framebufferSize.y <= 0)
+	{
+		return false;
+	}
+
+	if (screenPosition.x < 0 || screenPosition.y < 0
+		|| screenPosition.x >= framebufferSize.x || screenPosition.y >= framebufferSize.y)
+	{
+		return false;
+	}
+
+	const int minX = (std::max)(0, screenPosition.x - sampleRadius);
+	const int maxX = (std::min)(framebufferSize.x - 1, screenPosition.x + sampleRadius);
+	const int minY = (std::max)(0, screenPosition.y - sampleRadius);
+	const int maxY = (std::min)(framebufferSize.y - 1, screenPosition.y + sampleRadius);
+	const int sampleWidth = maxX - minX + 1;
+	const int sampleHeight = maxY - minY + 1;
+	const GLint readY = framebufferSize.y - 1 - maxY;
+	GLint previousReadFramebuffer = 0;
+	GLint previousReadBuffer = GL_BACK;
+	GLint previousPackAlignment = 4;
+
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousReadFramebuffer);
+	glGetIntegerv(GL_READ_BUFFER, &previousReadBuffer);
+	glGetIntegerv(GL_PACK_ALIGNMENT, &previousPackAlignment);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glReadBuffer(GL_BACK);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+
+	std::vector<unsigned char> pixels(static_cast<size_t>(sampleWidth * sampleHeight) * 4);
+	glReadPixels(minX, readY, sampleWidth, sampleHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+	glPixelStorei(GL_PACK_ALIGNMENT, previousPackAlignment);
+	glReadBuffer(static_cast<GLenum>(previousReadBuffer));
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, previousReadFramebuffer);
+
+	glm::vec3 accumulatedColor = {};
+	const size_t pixelCount = static_cast<size_t>(sampleWidth * sampleHeight);
+	for (size_t pixelIndex = 0; pixelIndex < pixelCount; ++pixelIndex)
+	{
+		const size_t baseIndex = pixelIndex * 4;
+		accumulatedColor.r += pixels[baseIndex + 0] / 255.0f;
+		accumulatedColor.g += pixels[baseIndex + 1] / 255.0f;
+		accumulatedColor.b += pixels[baseIndex + 2] / 255.0f;
+	}
+
+	sampledColor = accumulatedColor / static_cast<float>(pixelCount);
+
+	return true;
 }
 
 void uploadPlayerPaintTexture(PlayerPaintTexture &paintTexture)
@@ -722,6 +845,34 @@ void updatePaintBrushSize(const platform::Input &input)
 	playerPaintBrushRadius = static_cast<int>(std::round(playerPaintBrushRadiusPrecise));
 }
 
+void pickPaintColorFromScreen(platform::Input &input)
+{
+	if (!paintModeActive || cameraMode != CameraMode::ThirdPerson)
+	{
+		paintColorPickModeActive = false;
+		return;
+	}
+
+	if (!paintColorPickModeActive)
+	{
+		return;
+	}
+
+	if (paintColorUiCapturingMouse || !input.isLMousePressed())
+	{
+		return;
+	}
+
+	glm::vec3 sampledColor = {};
+	if (sampleVisibleScreenColor(getMouseFramebufferPosition(input), sampledColor))
+	{
+		playerPaintColorHsv = rgbToHsv(sampledColor);
+	}
+
+	paintColorPickModeActive = false;
+	resetPaintStrokeState();
+}
+
 void paintPlayerFromCursor(platform::Input &input)
 {
 	paintDebugState.hoverValid = false;
@@ -734,6 +885,12 @@ void paintPlayerFromCursor(platform::Input &input)
 	}
 
 	if (paintColorUiCapturingMouse)
+	{
+		resetPaintStrokeState();
+		return;
+	}
+
+	if (paintColorPickModeActive)
 	{
 		resetPaintStrokeState();
 		return;
@@ -791,6 +948,8 @@ void renderPaintColorPicker()
 	const gl2d::Rect panel = getPaintColorPanelRect();
 	const glm::vec3 currentPaintColor = hsvToRgb(playerPaintColorHsv);
 	const gl2d::Rect swatchRect = {panel.x + panel.z - 46.0f, panel.y + 12.0f, 28.0f, 28.0f};
+	const gl2d::Rect pickButtonRect = getPaintColorPickButtonRect();
+	const bool pickButtonHovered = pointInRect(glm::vec2(paintDebugState.framebufferMousePosition), pickButtonRect);
 
 	renderer.renderRectangle(panel, {0.05f, 0.06f, 0.08f, 0.88f});
 	renderer.renderRectangleOutline(panel, {0.0f, 0.0f, 0.0f, 0.9f}, 2.0f);
@@ -836,12 +995,37 @@ void renderPaintColorPicker()
 		}
 	}
 
+	gl2d::Color4f pickButtonColor = {0.12f, 0.14f, 0.18f, 0.96f};
+	if (paintColorPickModeActive)
+	{
+		pickButtonColor = {0.22f, 0.42f, 0.32f, 0.98f};
+	}
+	else if (pickButtonHovered)
+	{
+		pickButtonColor = {0.18f, 0.21f, 0.27f, 0.98f};
+	}
+
+	renderer.renderRectangle(pickButtonRect, pickButtonColor);
+	renderer.renderRectangleOutline(
+		pickButtonRect,
+		paintColorPickModeActive ? Colors_White : gl2d::Color4f{0.0f, 0.0f, 0.0f, 0.95f},
+		2.0f);
+
 	if (paintUiFontLoaded)
 	{
 		renderer.renderText({panel.x + 18.0f, panel.y + 22.0f}, "PAINT", paintUiFont, Colors_White, 22.0f, 2.0f, 2.0f, false);
 		renderer.renderText({panel.x + 18.0f, getPaintColorSliderRect(PaintColorSlider::Hue).y + 15.0f}, "H", paintUiFont, Colors_White, 18.0f, 2.0f, 2.0f, false);
 		renderer.renderText({panel.x + 18.0f, getPaintColorSliderRect(PaintColorSlider::Saturation).y + 15.0f}, "S", paintUiFont, Colors_White, 18.0f, 2.0f, 2.0f, false);
 		renderer.renderText({panel.x + 18.0f, getPaintColorSliderRect(PaintColorSlider::Value).y + 15.0f}, "V", paintUiFont, Colors_White, 18.0f, 2.0f, 2.0f, false);
+		renderer.renderText(
+			{pickButtonRect.x + 12.0f, pickButtonRect.y + 16.0f},
+			paintColorPickModeActive ? "PICKING" : "PICK SCREEN (C)",
+			paintUiFont,
+			Colors_White,
+			16.0f,
+			2.0f,
+			2.0f,
+			false);
 	}
 }
 
@@ -853,6 +1037,21 @@ void renderPaintBrushOverlay(const platform::Input &input)
 	}
 
 	const glm::vec2 mousePosition = glm::vec2(getMouseFramebufferPosition(input));
+	const glm::vec3 currentPaintColor = hsvToRgb(playerPaintColorHsv);
+
+	if (paintColorPickModeActive)
+	{
+		const gl2d::Rect outerRect = {mousePosition.x - 11.0f, mousePosition.y - 11.0f, 22.0f, 22.0f};
+		const gl2d::Rect innerRect = {mousePosition.x - 9.0f, mousePosition.y - 9.0f, 18.0f, 18.0f};
+		const gl2d::Rect swatchRect = {mousePosition.x + 16.0f, mousePosition.y + 16.0f, 18.0f, 18.0f};
+
+		renderer.renderRectangleOutline(outerRect, Colors_Black, 3.0f);
+		renderer.renderRectangleOutline(innerRect, Colors_White, 1.0f);
+		renderer.renderRectangle(swatchRect, toColor4f(currentPaintColor, 1.0f));
+		renderer.renderRectangleOutline(swatchRect, Colors_Black, 2.0f);
+		return;
+	}
+
 	const float previewRadius = (std::max)(
 		8.0f,
 		static_cast<float>(playerPaintBrushRadius) * PLAYER_PAINT_BRUSH_PREVIEW_SCALE);
@@ -904,10 +1103,8 @@ bool initGameplay()
 	renderer3D.init(1, 1, RESOURCES_PATH "BRDFintegrationMap.png");
 
 	renderer3D.skyBox = renderer3D.loadHDRSkyBox(RESOURCES_PATH "sky.hdr");
-	//renderer3D.skyBox.color = glm::vec4{0.8,0.8, 0.8,1};
 
 	playerModel = renderer3D.loadModel(RESOURCES_PATH "player3.glb", gl3d::maxQuality, 1);
-
 
 	playerEntity = renderer3D.createEntity(playerModel, {}, false, true, false);
 	renderer3D.setEntityAnimate(playerEntity, true);
@@ -920,13 +1117,10 @@ bool initGameplay()
 
 	syncPlayerEntityToPhysics();
 
-
-
 #pragma region map
 
 	if (1)
 	{
-
 		gl3d::Transform mapTransform;
 		mapTransform.rotation.x = glm::radians(-90.f);
 		mapTransform.position.x = -90;
@@ -936,11 +1130,9 @@ bool initGameplay()
 
 		mapEntity = renderer3D.createEntity(mapModel, mapTransform, true, true, false);
 		playerPhysics.setStaticMapCollision(RESOURCES_PATH "amongusMap.glb", 0.1f, mapTransform);
-
-	};
+	}
 
 #pragma endregion
-
 
 	auto grid = platform::createGridModel(
 		renderer3D,
@@ -952,10 +1144,10 @@ bool initGameplay()
 		"worldGrid");
 	renderer3D.createEntity(grid.model, {}, true, true, false);
 
-	renderer3D.createDirectionalLight({0,-1,0.3}, glm::vec3(1, 1, 1), 1, false);
-	renderer3D.createDirectionalLight({0,-1,-0.3}, glm::vec3(1, 1, 1), 1, false);
-	renderer3D.createDirectionalLight({0.3,-1,0.0}, glm::vec3(0.4, 0.4, 0.4), 1, false);
-	renderer3D.createDirectionalLight({-0.3,1,0.0}, glm::vec3(0.4, 0.4, 0.4), 1, false);
+	renderer3D.createDirectionalLight({0, -1, 0.3f}, glm::vec3(1, 1, 1), 1, false);
+	renderer3D.createDirectionalLight({0, -1, -0.3f}, glm::vec3(1, 1, 1), 1, false);
+	renderer3D.createDirectionalLight({0.3f, -1, 0.0f}, glm::vec3(0.4f, 0.4f, 0.4f), 1, false);
+	renderer3D.createDirectionalLight({-0.3f, 1, 0.0f}, glm::vec3(0.4f, 0.4f, 0.4f), 1, false);
 
 	renderer3D.camera.position = {0.0f, 2.2f, 6.0f};
 	renderer3D.camera.viewDirection = glm::normalize(
@@ -963,23 +1155,16 @@ bool initGameplay()
 	syncThirdPersonOrbitToCamera();
 #pragma endregion
 
-
-
 	return true;
 }
-
 
 bool updateGameplay(float deltaTime, platform::Input &input)
 {
 #pragma region init stuff
-	const int w = platform::getFrameBufferSizeX(); //window w
-	const int h = platform::getFrameBufferSizeY(); //window h
+	const int w = platform::getFrameBufferSizeX();
+	const int h = platform::getFrameBufferSizeY();
 	(void)input;
-
 #pragma endregion
-
-	//renderer.renderRectangle({100,100, 100, 100}, Colors_Blue);
-
 
 	renderer3D.updateWindowMetrics(w, h);
 
@@ -991,6 +1176,10 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 	if (cameraMode == CameraMode::ThirdPerson && platform::isButtonPressed(platform::Button::F))
 	{
 		paintModeActive = !paintModeActive;
+		if (!paintModeActive)
+		{
+			paintColorPickModeActive = false;
+		}
 	}
 
 	updatePaintColorPicker(input);
@@ -1040,12 +1229,11 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 		updateThirdPersonCamera();
 	}
 
-
 	renderer3D.render(deltaTime);
+	pickPaintColorFromScreen(input);
 	paintPlayerFromCursor(input);
 	renderPaintBrushOverlay(input);
 	renderPaintColorPicker();
-
 
 	{
 		ImGuiViewport *mainVp = ImGui::GetMainViewport();
@@ -1056,16 +1244,13 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 		windowClass.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
 		ImGui::SetNextWindowClass(&windowClass);
 
-		// place it to the right of the main window
 		ImGui::SetNextWindowPos(
 			ImVec2(mainVp->Pos.x + mainVp->Size.x + 20, mainVp->Pos.y + 50),
 			ImGuiCond_FirstUseEver
 		);
 
-
 		ImGui::PushMakeWindowNotTransparent();
 		ImGui::Begin("Tweaks");
-
 
 		static int animation = 9;
 		ImGui::SliderInt("Animation", &animation, 0, PLAYER_ANIMATIONS - 1);
@@ -1078,8 +1263,9 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 		ImGui::Text("Free camera: WASD + Q/E");
 		ImGui::Text("Player: WASD move, Shift run / wall descend, Space jump / wall climb");
 		ImGui::Text("Paint mode: %s", paintModeActive ? "On" : "Off");
-		ImGui::Text("Paint: F toggle, Left click paint, Right drag resize, Middle drag orbit, Scroll zoom");
+		ImGui::Text("Paint: F toggle, C pick color, Left click paint, Right drag resize, Middle drag orbit, Scroll zoom");
 		ImGui::Text("Paint brush radius: %d%s", playerPaintBrushRadius, paintDebugState.brushResizeActive ? " (resizing)" : "");
+		ImGui::Text("Color picker tool: %s", paintColorPickModeActive ? "On" : "Off");
 		ImGui::Text("Paint textures: %d", static_cast<int>(playerPaintTextures.size()));
 		ImGui::Text(
 			"Mouse window %d,%d framebuffer %d,%d",
@@ -1112,17 +1298,13 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 		ImGui::Text("Grounded: %s", playerPhysics.isGrounded() ? "Yes" : "No");
 		ImGui::Text("Wall attached: %s", playerPhysics.isWallAttached() ? "Yes" : "No");
 
-
 		ImGui::PopMakeWindowNotTransparent();
 		ImGui::End();
 	}
 
 	return true;
-#pragma endregion
-
 }
 
-//This function might not be be called if the program is forced closed
 void shutdownGameplay()
 {
 	if (paintUiFontLoaded)
@@ -1146,6 +1328,7 @@ bool ClientGameplay::init(gl2d::Renderer2D &inRenderer)
 	playerPaintBrushRadius = PLAYER_PAINT_BRUSH_RADIUS_DEFAULT;
 	playerPaintBrushRadiusPrecise = static_cast<float>(PLAYER_PAINT_BRUSH_RADIUS_DEFAULT);
 	playerPaintColorHsv = {0.0f, 1.0f, 0.0f};
+	paintColorPickModeActive = false;
 	paintColorUiHovered = false;
 	paintColorUiCapturingMouse = false;
 	paintUiFontLoaded = false;
@@ -1187,6 +1370,7 @@ void ClientGameplay::shutdown()
 #undef playerPaintBrushRadius
 #undef playerPaintBrushRadiusPrecise
 #undef playerPaintColorHsv
+#undef paintColorPickModeActive
 #undef paintColorUiHovered
 #undef paintColorUiCapturingMouse
 #undef paintUiFontLoaded

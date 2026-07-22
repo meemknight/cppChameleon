@@ -19,7 +19,7 @@ bool initGame()
 	gl2d::init();
 	renderer.create();
 
-	uiTexture.loadFromFile(RESOURCES_PATH "ui.png");
+	uiTexture.loadFromFile(RESOURCES_PATH "ui.png", true, true);
 	font.createFromFile(RESOURCES_PATH "Arial.ttf");
 
 	return true;

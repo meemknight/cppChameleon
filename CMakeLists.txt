@@ -70,6 +70,8 @@ add_subdirectory(thirdparty/gl2d)				#2D rendering library
 add_subdirectory(thirdparty/gl3d)				#3D
 add_subdirectory(thirdparty/glui)				
 add_subdirectory(thirdparty/JoltPhysics/Build)	#physics
+add_subdirectory(thirdparty/enet-1.3.18)		#netowrking
+add_subdirectory(thirdparty/zstd-1.5.5/build/cmake)		#compression
 
 
 # MY_SOURCES is defined to be a list of all the source files for my game
@@ -116,6 +118,7 @@ endif()
 target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/")
 target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/gameLayer/")
 target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/platform/")
+target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/zstd-1.5.5/lib/")
 
 target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE
 	glm
@@ -128,4 +131,6 @@ target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE
 	imgui
 	Jolt
 	glui
+	enet
+	libzstd_static
 )

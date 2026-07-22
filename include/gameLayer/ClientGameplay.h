@@ -69,6 +69,7 @@ struct ClientGameplay
 	int playerPaintBrushRadius = 6;
 	float playerPaintBrushRadiusPrecise = 6.0f;
 	glm::vec3 playerPaintColorHsv = {0.0f, 1.0f, 0.0f};
+	bool paintColorPickModeActive = false;
 	bool paintColorUiHovered = false;
 	bool paintColorUiCapturingMouse = false;
 	bool paintUiFontLoaded = false;
