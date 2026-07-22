@@ -27,7 +27,10 @@ gl3d::Model mapModel;
 
 #define PLAYER_ANIMATIONS 18
 const float PLAYER_MODEL_YAW_OFFSET = 3.141592;
-const float THIRD_PERSON_CAMERA_DISTANCE = 5.0f;
+const float THIRD_PERSON_CAMERA_DISTANCE_DEFAULT = 7.5f;
+const float THIRD_PERSON_CAMERA_DISTANCE_MIN = 2.5f;
+const float THIRD_PERSON_CAMERA_DISTANCE_MAX = 12.0f;
+const float THIRD_PERSON_CAMERA_ZOOM_STEP = 0.85f;
 const float THIRD_PERSON_CAMERA_TARGET_HEIGHT = 1.45f;
 const float THIRD_PERSON_PITCH_MIN = glm::radians(-70.0f);
 const float THIRD_PERSON_PITCH_MAX = glm::radians(35.0f);
@@ -35,6 +38,15 @@ const float THIRD_PERSON_PITCH_MAX = glm::radians(35.0f);
 gl3d::Entity playerEntity;
 gl3d::Entity mapEntity;
 PhysicsController playerPhysics;
+
+struct PlayerPaintTexture
+{
+	int meshIndex = -1;
+	gl3d::Texture texture = {};
+	glm::ivec2 size = {};
+	int quality = gl3d::maxQuality;
+	std::vector<unsigned char> pixels;
+};
 
 enum class CameraMode
 {
@@ -45,6 +57,22 @@ enum class CameraMode
 CameraMode cameraMode = CameraMode::Free;
 float thirdPersonYaw = 0.0f;
 float thirdPersonPitch = glm::radians(-18.0f);
+float thirdPersonCameraDistance = THIRD_PERSON_CAMERA_DISTANCE_DEFAULT;
+bool paintModeActive = false;
+std::vector<PlayerPaintTexture> playerPaintTextures;
+constexpr int PLAYER_PAINT_BRUSH_RADIUS = 6;
+
+struct PaintDebugState
+{
+	bool hoverValid = false;
+	gl3d::PaintTargetSample hoverSample = {};
+	bool clickValid = false;
+	gl3d::PaintTargetSample clickSample = {};
+	glm::ivec2 windowMousePosition = {};
+	glm::ivec2 framebufferMousePosition = {};
+};
+
+PaintDebugState paintDebugState;
 
 #define USE_GPU 1
 
@@ -58,11 +86,11 @@ extern "C"
 
 
 
-glm::vec2 consumeLookDelta(glm::vec2 &lastMousePos)
+glm::vec2 consumeLookDelta(glm::vec2 &lastMousePos, bool captureMouse)
 {
 	glm::vec2 delta = {};
 
-	if (platform::hasFocused())
+	if (platform::hasFocused() && captureMouse)
 	{
 		platform::showMouse(false);
 
@@ -138,6 +166,10 @@ void setCameraMode(CameraMode newMode)
 	if (newMode == CameraMode::ThirdPerson)
 	{
 		syncThirdPersonOrbitToCamera();
+	}
+	else
+	{
+		paintModeActive = false;
 	}
 
 	cameraMode = newMode;
@@ -226,6 +258,240 @@ void syncPlayerEntityToPhysics()
 	renderer3D.setEntityTransform(playerEntity, playerTransform);
 }
 
+bool copyTextureToCpu(gl3d::Texture texture, std::vector<unsigned char> &pixels, glm::ivec2 &size, int &quality)
+{
+	gl3d::GpuTexture *gpuTexture = renderer3D.getTextureData(texture);
+	if (gpuTexture == nullptr || gpuTexture->id == 0)
+	{
+		return false;
+	}
+
+	size = gpuTexture->getTextureSize();
+	if (size.x <= 0 || size.y <= 0)
+	{
+		return false;
+	}
+
+	quality = gpuTexture->getTextureQuality();
+	pixels.assign(size.x * size.y * 4, 255);
+
+	glBindTexture(GL_TEXTURE_2D, gpuTexture->id);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	return true;
+}
+
+void computeTextureAlphaFlags(const std::vector<unsigned char> &pixels, bool &alphaExists, bool &alphaHasData)
+{
+	alphaExists = false;
+	alphaHasData = false;
+
+	for (size_t i = 3; i < pixels.size(); i += 4)
+	{
+		if (pixels[i] != 255)
+		{
+			alphaExists = true;
+		}
+
+		if (pixels[i] != 0 && pixels[i] != 255)
+		{
+			alphaHasData = true;
+		}
+
+		if (alphaExists && alphaHasData)
+		{
+			return;
+		}
+	}
+}
+
+gl3d::Texture createPaintTexture(const PlayerPaintTexture &paintTexture)
+{
+	bool alphaExists = false;
+	bool alphaHasData = false;
+	computeTextureAlphaFlags(paintTexture.pixels, alphaExists, alphaHasData);
+
+	gl3d::GpuTexture gpuTexture;
+	gpuTexture.loadTextureFromMemory(
+		const_cast<unsigned char *>(paintTexture.pixels.data()),
+		paintTexture.size.x,
+		paintTexture.size.y,
+		4,
+		paintTexture.quality);
+
+	return renderer3D.createIntenralTexture(
+		gpuTexture,
+		alphaExists ? 1 : 0,
+		alphaHasData ? 1 : 0,
+		"playerPaintMesh" + std::to_string(paintTexture.meshIndex));
+}
+
+PlayerPaintTexture *getPlayerPaintTexture(int meshIndex)
+{
+	for (auto &paintTexture : playerPaintTextures)
+	{
+		if (paintTexture.meshIndex == meshIndex)
+		{
+			return &paintTexture;
+		}
+	}
+
+	return nullptr;
+}
+
+glm::ivec2 getMouseFramebufferPosition(const platform::Input &input)
+{
+	const glm::ivec2 windowSize = platform::getWindowSize();
+	const glm::ivec2 framebufferSize = platform::getFrameBufferSize();
+
+	paintDebugState.windowMousePosition = {input.mouseX, input.mouseY};
+
+	if (windowSize.x <= 0 || windowSize.y <= 0)
+	{
+		paintDebugState.framebufferMousePosition = paintDebugState.windowMousePosition;
+		return paintDebugState.framebufferMousePosition;
+	}
+
+	paintDebugState.framebufferMousePosition = {
+		input.mouseX * framebufferSize.x / windowSize.x,
+		input.mouseY * framebufferSize.y / windowSize.y
+	};
+
+	return paintDebugState.framebufferMousePosition;
+}
+
+void uploadPlayerPaintTexture(PlayerPaintTexture &paintTexture)
+{
+	gl3d::GpuTexture *gpuTexture = renderer3D.getTextureData(paintTexture.texture);
+	if (gpuTexture == nullptr || gpuTexture->id == 0)
+	{
+		return;
+	}
+
+	glBindTexture(GL_TEXTURE_2D, gpuTexture->id);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexSubImage2D(
+		GL_TEXTURE_2D,
+		0,
+		0,
+		0,
+		paintTexture.size.x,
+		paintTexture.size.y,
+		GL_RGBA,
+		GL_UNSIGNED_BYTE,
+		paintTexture.pixels.data());
+
+	if (paintTexture.quality > gl3d::linearNoMipmap)
+	{
+		glGenerateMipmap(GL_TEXTURE_2D);
+	}
+}
+
+void paintTextureBlack(PlayerPaintTexture &paintTexture, glm::ivec2 center)
+{
+	for (int y = center.y - PLAYER_PAINT_BRUSH_RADIUS; y <= center.y + PLAYER_PAINT_BRUSH_RADIUS; ++y)
+	{
+		for (int x = center.x - PLAYER_PAINT_BRUSH_RADIUS; x <= center.x + PLAYER_PAINT_BRUSH_RADIUS; ++x)
+		{
+			if (x < 0 || y < 0 || x >= paintTexture.size.x || y >= paintTexture.size.y)
+			{
+				continue;
+			}
+
+			const glm::ivec2 delta = glm::ivec2(x, y) - center;
+			if (delta.x * delta.x + delta.y * delta.y > PLAYER_PAINT_BRUSH_RADIUS * PLAYER_PAINT_BRUSH_RADIUS)
+			{
+				continue;
+			}
+
+			const size_t pixelIndex = static_cast<size_t>(x + y * paintTexture.size.x) * 4;
+			paintTexture.pixels[pixelIndex + 0] = 0;
+			paintTexture.pixels[pixelIndex + 1] = 0;
+			paintTexture.pixels[pixelIndex + 2] = 0;
+		}
+	}
+}
+
+void setupPlayerPaintTextures()
+{
+	playerPaintTextures.clear();
+
+	const int meshCount = renderer3D.getEntityMeshesCount(playerEntity);
+	for (int meshIndex = 0; meshIndex < meshCount; ++meshIndex)
+	{
+		gl3d::TextureDataForMaterial materialTextures = renderer3D.getEntityMeshMaterialTextures(playerEntity, meshIndex);
+		if (!renderer3D.isTexture(materialTextures.albedoTexture))
+		{
+			continue;
+		}
+
+		PlayerPaintTexture paintTexture = {};
+		paintTexture.meshIndex = meshIndex;
+		if (!copyTextureToCpu(materialTextures.albedoTexture, paintTexture.pixels, paintTexture.size, paintTexture.quality))
+		{
+			continue;
+		}
+
+		paintTexture.texture = createPaintTexture(paintTexture);
+		materialTextures.albedoTexture = paintTexture.texture;
+		renderer3D.setEntityMeshMaterialTextures(playerEntity, meshIndex, materialTextures);
+		playerPaintTextures.push_back(std::move(paintTexture));
+	}
+
+	renderer3D.setEntityPaintTarget(playerEntity);
+}
+
+void paintPlayerFromCursor(platform::Input &input)
+{
+	paintDebugState.hoverValid = false;
+
+	if (!paintModeActive || cameraMode != CameraMode::ThirdPerson)
+	{
+		return;
+	}
+
+	gl3d::PaintTargetSample sample = {};
+	if (!renderer3D.sampleEntityPaintTarget(getMouseFramebufferPosition(input), sample))
+	{
+		paintDebugState.clickValid = false;
+		return;
+	}
+
+	paintDebugState.hoverValid = true;
+	paintDebugState.hoverSample = sample;
+
+	if (!input.isLMouseHeld())
+	{
+		return;
+	}
+
+	PlayerPaintTexture *paintTexture = getPlayerPaintTexture(sample.meshIndex);
+	if (paintTexture == nullptr)
+	{
+		paintDebugState.clickValid = false;
+		return;
+	}
+
+	paintTextureBlack(*paintTexture, sample.texturePixel);
+	uploadPlayerPaintTexture(*paintTexture);
+	paintDebugState.clickValid = true;
+	paintDebugState.clickSample = sample;
+}
+
+void updateThirdPersonCameraZoom()
+{
+	ImGuiIO &io = ImGui::GetIO();
+	if (io.WantCaptureMouse || std::abs(io.MouseWheel) < 0.001f)
+	{
+		return;
+	}
+
+	thirdPersonCameraDistance = std::clamp(
+		thirdPersonCameraDistance - io.MouseWheel * THIRD_PERSON_CAMERA_ZOOM_STEP,
+		THIRD_PERSON_CAMERA_DISTANCE_MIN,
+		THIRD_PERSON_CAMERA_DISTANCE_MAX);
+}
+
 void updateThirdPersonCamera()
 {
 	const glm::vec3 playerPosition = playerPhysics.getPlayerPosition();
@@ -233,7 +499,7 @@ void updateThirdPersonCamera()
 	const glm::vec3 target = playerPosition + glm::vec3(0.0f, THIRD_PERSON_CAMERA_TARGET_HEIGHT, 0.0f);
 
 	renderer3D.camera.viewDirection = cameraForward;
-	renderer3D.camera.position = target - cameraForward * THIRD_PERSON_CAMERA_DISTANCE;
+	renderer3D.camera.position = target - cameraForward * thirdPersonCameraDistance;
 }
 
 bool initGame()
@@ -255,6 +521,7 @@ bool initGame()
 
 	playerEntity = renderer3D.createEntity(playerModel, {}, false, true, false);
 	renderer3D.setEntityAnimate(playerEntity, true);
+	setupPlayerPaintTextures();
 
 	if (!playerPhysics.init())
 	{
@@ -333,23 +600,30 @@ bool gameLogic(float deltaTime, platform::Input &input)
 
 	renderer3D.updateWindowMetrics(w, h);
 
-	static glm::vec2 lastMousePosition = {};
-	const glm::vec2 lookDelta = consumeLookDelta(lastMousePosition);
-
 	if (platform::isButtonPressed(platform::Button::Tab))
 	{
 		toggleCameraMode();
 	}
+
+	if (cameraMode == CameraMode::ThirdPerson && platform::isButtonPressed(platform::Button::F))
+	{
+		paintModeActive = !paintModeActive;
+	}
+
+	const bool captureMouseLook = cameraMode == CameraMode::Free || !paintModeActive;
+	static glm::vec2 lastMousePosition = {};
+	const glm::vec2 lookDelta = consumeLookDelta(lastMousePosition, captureMouseLook);
 
 	PhysicsControllerInput playerInput = {};
 	if (cameraMode == CameraMode::Free)
 	{
 		applyFreeCameraInput(renderer3D, 20.0f, deltaTime, lookDelta);
 	}
-	else
+	else if (!paintModeActive)
 	{
 		thirdPersonYaw -= lookDelta.x;
 		thirdPersonPitch = std::clamp(thirdPersonPitch + lookDelta.y, THIRD_PERSON_PITCH_MIN, THIRD_PERSON_PITCH_MAX);
+		updateThirdPersonCameraZoom();
 		playerInput = buildPlayerInput();
 	}
 
@@ -363,6 +637,7 @@ bool gameLogic(float deltaTime, platform::Input &input)
 
 
 	renderer3D.render(deltaTime);
+	paintPlayerFromCursor(input);
 
 
 	renderer.flush();
@@ -388,7 +663,7 @@ bool gameLogic(float deltaTime, platform::Input &input)
 		ImGui::Begin("Tweaks");
 
 
-		static int animation = 0;
+		static int animation = 9;
 		ImGui::SliderInt("Animation", &animation, 0, PLAYER_ANIMATIONS - 1);
 		renderer3D.setEntityAnimationIndex(playerEntity, animation);
 		ImGui::Text("Camera: %s", cameraMode == CameraMode::Free ? "Free" : "Third-Person");
@@ -398,6 +673,37 @@ bool gameLogic(float deltaTime, platform::Input &input)
 		}
 		ImGui::Text("Free camera: WASD + Q/E");
 		ImGui::Text("Player: WASD move, Shift run, Space jump");
+		ImGui::Text("Paint mode: %s", paintModeActive ? "On" : "Off");
+		ImGui::Text("Paint: F toggle, Left click to paint black");
+		ImGui::Text("Paint textures: %d", static_cast<int>(playerPaintTextures.size()));
+		ImGui::Text(
+			"Mouse window %d,%d framebuffer %d,%d",
+			paintDebugState.windowMousePosition.x,
+			paintDebugState.windowMousePosition.y,
+			paintDebugState.framebufferMousePosition.x,
+			paintDebugState.framebufferMousePosition.y);
+		ImGui::Text("ImGui wants mouse: %s", ImGui::GetIO().WantCaptureMouse ? "Yes" : "No");
+		ImGui::Text("Paint hover hit: %s", paintDebugState.hoverValid ? "Yes" : "No");
+		if (paintDebugState.hoverValid)
+		{
+			ImGui::Text(
+				"Hover mesh %d texel %d,%d / %d,%d",
+				paintDebugState.hoverSample.meshIndex,
+				paintDebugState.hoverSample.texturePixel.x,
+				paintDebugState.hoverSample.texturePixel.y,
+				paintDebugState.hoverSample.textureSize.x,
+				paintDebugState.hoverSample.textureSize.y);
+		}
+		ImGui::Text("Paint click hit: %s", paintDebugState.clickValid ? "Yes" : "No");
+		if (paintDebugState.clickValid)
+		{
+			ImGui::Text(
+				"Last click mesh %d texel %d,%d",
+				paintDebugState.clickSample.meshIndex,
+				paintDebugState.clickSample.texturePixel.x,
+				paintDebugState.clickSample.texturePixel.y);
+		}
+		ImGui::Text("Third-person zoom: Mouse wheel (%.1f)", thirdPersonCameraDistance);
 		ImGui::Text("Grounded: %s", playerPhysics.isGrounded() ? "Yes" : "No");
 
 

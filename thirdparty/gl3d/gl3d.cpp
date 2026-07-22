@@ -34353,6 +34353,52 @@ namespace gl3d
 "a_textureDerivates.w = fromFloat2TouShort(dFdy(v_texCoord.y));\n"
 "}\n"},
 
+      std::pair<std::string, const char*>{"paintTarget.frag", "#version 430\n"
+"#extension GL_ARB_bindless_texture: require\n"
+"layout(location = 0) out uvec2 a_paintInfo;\n"
+"in vec2 v_texCoord;\n"
+"uniform ivec2 u_textureSize;\n"
+"uniform int u_materialIndex;\n"
+"uniform int u_meshIndex;\n"
+"struct MaterialStruct\n"
+"{\n"
+"vec4 kd;\n"
+"vec4 rma; \n"
+"uvec4 firstBIndlessSamplers;  \n"
+"uvec2 secondBIndlessSamplers; \n"
+"int rmaLoaded;\n"
+"int notUsed;\n"
+"};\n"
+"readonly layout(std140) buffer u_material\n"
+"{\n"
+"MaterialStruct mat[];\n"
+"};\n"
+"vec2 wrapUv(vec2 uv)\n"
+"{\n"
+"vec2 wrapped = fract(uv);\n"
+"if(wrapped.x < 0.0) { wrapped.x += 1.0; }\n"
+"if(wrapped.y < 0.0) { wrapped.y += 1.0; }\n"
+"return wrapped;\n"
+"}\n"
+"void main()\n"
+"{\n"
+"uvec2 albedoSampler = mat[u_materialIndex].firstBIndlessSamplers.xy;\n"
+"if(albedoSampler.x == 0 && albedoSampler.y == 0)\n"
+"{\n"
+"discard;\n"
+"}\n"
+"vec2 wrappedUv = wrapUv(v_texCoord);\n"
+"float alphaData = texture(sampler2D(albedoSampler), wrappedUv).a * mat[u_materialIndex].kd.a;\n"
+"if(alphaData <= 0.01)\n"
+"{\n"
+"discard;\n"
+"}\n"
+"ivec2 clampedTextureSize = max(u_textureSize, ivec2(1));\n"
+"ivec2 texelCoord = clamp(ivec2(floor(wrappedUv * vec2(clampedTextureSize))), ivec2(0), clampedTextureSize - 1);\n"
+"uint texelId = uint(texelCoord.x + texelCoord.y * clampedTextureSize.x + 1);\n"
+"a_paintInfo = uvec2(uint(u_meshIndex + 1), texelId);\n"
+"}\n"},
+
       std::pair<std::string, const char*>{"noaa.frag", "#version 150\n"
 "out vec4 a_color;\n"
 "noperspective in vec2 v_texCoords;\n"
@@ -35115,6 +35161,20 @@ namespace gl3d
 
 
 
+		paintTargetShader.shader.loadShaderProgramFromFile("shaders/deferred/geometryPass.vert",
+			"shaders/deferred/paintTarget.frag", errorReporter, fileOpener);
+		paintTargetShader.u_transform = getUniform(paintTargetShader.shader.id, "u_transform", errorReporter);
+		paintTargetShader.u_modelTransform = getUniform(paintTargetShader.shader.id, "u_modelTransform", errorReporter);
+		paintTargetShader.u_motelViewTransform = getUniform(paintTargetShader.shader.id, "u_motelViewTransform", errorReporter);
+		paintTargetShader.u_hasAnimations = getUniform(paintTargetShader.shader.id, "u_hasAnimations", errorReporter);
+		paintTargetShader.u_materialIndex = getUniform(paintTargetShader.shader.id, "u_materialIndex", errorReporter);
+		paintTargetShader.u_meshIndex = getUniform(paintTargetShader.shader.id, "u_meshIndex", errorReporter);
+		paintTargetShader.u_textureSize = getUniform(paintTargetShader.shader.id, "u_textureSize", errorReporter);
+		paintTargetShader.materialBlockLocation = getStorageBlockIndex(paintTargetShader.shader.id, "u_material", errorReporter);
+		glShaderStorageBlockBinding(paintTargetShader.shader.id, paintTargetShader.materialBlockLocation, internal::MaterialBlockBinding);
+		paintTargetShader.u_jointTransforms = getStorageBlockIndex(paintTargetShader.shader.id, "u_jointTransforms", errorReporter);
+		glShaderStorageBlockBinding(paintTargetShader.shader.id, paintTargetShader.u_jointTransforms, internal::JointsTransformBlockBinding);
+
 		geometryPassShader.loadShaderProgramFromFile("shaders/deferred/geometryPass.vert",
 			"shaders/deferred/geometryPass.frag", errorReporter, fileOpener);
 		//geometryPassShader.bind();
@@ -35257,6 +35317,7 @@ namespace gl3d
 		brdfTexture.clear();
 		prePass.shader.clear();
 		pointShadowShader.shader.clear();
+		paintTargetShader.shader.clear();
 		geometryPassShader.clear();
 		glDeleteBuffers(1, &materialBlockBuffer);
 		lightingPassShader.clear();
@@ -36767,6 +36828,7 @@ namespace gl3d
 		//defaultTexture.loadTextureFromMemory(textureData, 2, 2, 4, TextureLoadQuality::leastPossible);
 
 		internal.gBuffer.create(x, y, errorReporter, frameBuffer);
+		internal.paintTargetBuffer.create(x, y, errorReporter, frameBuffer, internal.gBuffer.depthBuffer);
 		internal.ssao.create(x, y, errorReporter, fileOpener, frameBuffer);
 		internal.hbao.create(errorReporter, fileOpener);
 		postProcess.create(x, y, errorReporter, fileOpener, frameBuffer);
@@ -38885,6 +38947,142 @@ namespace gl3d
 		{
 			return; //warn
 		}
+	}
+
+	void Renderer3D::setEntityPaintTarget(Entity& e)
+	{
+		if (internal.getEntityIndex(e) < 0)
+		{
+			internal.paintTargetEntity = {};
+			return;
+		}
+
+		internal.paintTargetEntity = e;
+	}
+
+	void Renderer3D::clearEntityPaintTarget()
+	{
+		internal.paintTargetEntity = {};
+	}
+
+	bool Renderer3D::sampleEntityPaintTarget(glm::ivec2 screenPosition, PaintTargetSample &sample)
+	{
+		sample = {};
+
+		const int entityIndex = internal.getEntityIndex(internal.paintTargetEntity);
+		if (entityIndex < 0)
+		{
+			return false;
+		}
+
+		if (internal.paintTargetBuffer.currentDimensions.x <= 0 || internal.paintTargetBuffer.currentDimensions.y <= 0)
+		{
+			return false;
+		}
+
+		if (screenPosition.x < 0 || screenPosition.y < 0 || screenPosition.x >= internal.w || screenPosition.y >= internal.h)
+		{
+			return false;
+		}
+
+		const int scaledX = std::clamp(screenPosition.x * internal.paintTargetBuffer.currentDimensions.x / std::max(1, internal.w),
+			0, internal.paintTargetBuffer.currentDimensions.x - 1);
+		const int scaledY = std::clamp(screenPosition.y * internal.paintTargetBuffer.currentDimensions.y / std::max(1, internal.h),
+			0, internal.paintTargetBuffer.currentDimensions.y - 1);
+		const int readY = internal.paintTargetBuffer.currentDimensions.y - 1 - scaledY;
+
+		unsigned int pixel[2] = {};
+		const auto tryReadPixel = [&](int x, int y)
+		{
+			unsigned int candidate[2] = {};
+			glReadPixels(x, y, 1, 1, GL_RG_INTEGER, GL_UNSIGNED_INT, candidate);
+			if (candidate[0] == 0 || candidate[1] == 0)
+			{
+				return false;
+			}
+
+			pixel[0] = candidate[0];
+			pixel[1] = candidate[1];
+			return true;
+		};
+
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, internal.paintTargetBuffer.framebuffer);
+		glReadBuffer(GL_COLOR_ATTACHMENT0);
+
+		bool foundPixel = tryReadPixel(scaledX, readY);
+		if (!foundPixel)
+		{
+			constexpr int searchRadius = 6;
+			for (int radius = 1; radius <= searchRadius && !foundPixel; ++radius)
+			{
+				for (int offsetY = -radius; offsetY <= radius && !foundPixel; ++offsetY)
+				{
+					for (int offsetX = -radius; offsetX <= radius; ++offsetX)
+					{
+						if (std::abs(offsetX) != radius && std::abs(offsetY) != radius)
+						{
+							continue;
+						}
+
+						const int sampleX = std::clamp(scaledX + offsetX, 0, internal.paintTargetBuffer.currentDimensions.x - 1);
+						const int sampleY = std::clamp(readY + offsetY, 0, internal.paintTargetBuffer.currentDimensions.y - 1);
+						if (tryReadPixel(sampleX, sampleY))
+						{
+							foundPixel = true;
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, frameBuffer);
+
+		if (!foundPixel)
+		{
+			return false;
+		}
+
+		auto &entity = internal.cpuEntities[entityIndex];
+		const int meshIndex = static_cast<int>(pixel[0]) - 1;
+		if (meshIndex < 0 || meshIndex >= static_cast<int>(entity.models.size()))
+		{
+			return false;
+		}
+
+		int materialId = internal.getMaterialIndex(entity.models[meshIndex].material);
+		if (materialId < 0)
+		{
+			return false;
+		}
+
+		TextureDataForMaterial textureData = internal.materialTexturesData[materialId];
+		int albedoTextureIndex = internal.getTextureIndex(textureData.albedoTexture);
+		if (albedoTextureIndex < 0)
+		{
+			return false;
+		}
+
+		glm::ivec2 textureSize = internal.loadedTextures[albedoTextureIndex].texture.getTextureSize();
+		if (textureSize.x <= 0 || textureSize.y <= 0)
+		{
+			return false;
+		}
+
+		const unsigned int texelIndex = pixel[1] - 1;
+		const unsigned int maxTexelCount = static_cast<unsigned int>(textureSize.x * textureSize.y);
+		if (texelIndex >= maxTexelCount)
+		{
+			return false;
+		}
+
+		sample.meshIndex = meshIndex;
+		sample.textureSize = textureSize;
+		sample.texturePixel = {
+			static_cast<int>(texelIndex % static_cast<unsigned int>(textureSize.x)),
+			static_cast<int>(texelIndex / static_cast<unsigned int>(textureSize.x))
+		};
+		return true;
 	}
 
 	bool Renderer3D::isEntity(Entity& e)
@@ -41842,6 +42040,111 @@ namespace gl3d
 			glEnable(GL_DEPTH_TEST);
 			glDisable(GL_BLEND);
 		};
+		auto renderPaintTarget = [&]()
+		{
+			GLuint clearColor[2] = {0u, 0u};
+			glBindFramebuffer(GL_FRAMEBUFFER, internal.paintTargetBuffer.framebuffer);
+			glViewport(0, 0, internal.paintTargetBuffer.currentDimensions.x, internal.paintTargetBuffer.currentDimensions.y);
+			glEnable(GL_DEPTH_TEST);
+			glDisable(GL_BLEND);
+			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+			glClearBufferuiv(GL_COLOR, 0, clearColor);
+
+			const int paintEntityIndex = internal.getEntityIndex(internal.paintTargetEntity);
+			if (paintEntityIndex < 0)
+			{
+				return;
+			}
+
+			auto &entity = internal.cpuEntities[paintEntityIndex];
+			if (!entity.isVisible() || entity.models.empty())
+			{
+				return;
+			}
+
+			auto &paintShader = internal.lightShader.paintTargetShader;
+			paintShader.shader.bind();
+
+			if (zPrePass)
+			{
+				glDepthFunc(GL_EQUAL);
+			}
+			else
+			{
+				glDepthFunc(GL_LEQUAL);
+			}
+
+			glDepthMask(GL_FALSE);
+
+			auto transformMat = entity.transform.getTransformMatrix();
+			auto modelViewProjMat = worldProjectionMatrix * transformMat;
+			auto modelViewMat = worldToViewMatrix * transformMat;
+
+			glUniformMatrix4fv(paintShader.u_transform, 1, GL_FALSE, &modelViewProjMat[0][0]);
+			glUniformMatrix4fv(paintShader.u_modelTransform, 1, GL_FALSE, &transformMat[0][0]);
+			glUniformMatrix4fv(paintShader.u_motelViewTransform, 1, GL_FALSE, &modelViewMat[0][0]);
+
+			if (entity.animate())
+			{
+				glBindBufferBase(GL_SHADER_STORAGE_BUFFER, internal::JointsTransformBlockBinding,
+					entity.appliedSkinningMatricesBuffer);
+			}
+			else
+			{
+				glUniform1i(paintShader.u_hasAnimations, false);
+			}
+
+			for (int meshIndex = 0; meshIndex < static_cast<int>(entity.models.size()); ++meshIndex)
+			{
+				auto &model = entity.models[meshIndex];
+				if (frustumCulling && model.culledThisFrame)
+				{
+					continue;
+				}
+
+				const int materialId = internal.getMaterialIndex(model.material);
+				if (materialId < 0)
+				{
+					continue;
+				}
+
+				TextureDataForMaterial textureData = internal.materialTexturesData[materialId];
+				const int albedoTextureIndex = internal.getTextureIndex(textureData.albedoTexture);
+				if (albedoTextureIndex < 0)
+				{
+					continue;
+				}
+
+				glm::ivec2 textureSize = internal.loadedTextures[albedoTextureIndex].texture.getTextureSize();
+				if (textureSize.x <= 0 || textureSize.y <= 0)
+				{
+					continue;
+				}
+
+				if (entity.animate())
+				{
+					glUniform1i(paintShader.u_hasAnimations, model.hasBones ? true : false);
+				}
+
+				glUniform1i(paintShader.u_materialIndex, materialId);
+				glUniform1i(paintShader.u_meshIndex, meshIndex);
+				glUniform2i(paintShader.u_textureSize, textureSize.x, textureSize.y);
+
+				glBindVertexArray(model.vertexArray);
+				if (model.indexBuffer)
+				{
+					glDrawElements(GL_TRIANGLES, model.primitiveCount, GL_UNSIGNED_INT, 0);
+				}
+				else
+				{
+					glDrawArrays(GL_TRIANGLES, 0, model.primitiveCount);
+				}
+			}
+
+			glDepthMask(GL_TRUE);
+			glDepthFunc(GL_LESS);
+		};
+
 		//do the lighting pass
 		lightingPass(false);
 
@@ -41849,6 +42152,7 @@ namespace gl3d
 		glClearTexImage(internal.gBuffer.buffers[internal.gBuffer.materialIndex], 0, GL_RED_INTEGER, GL_INT, 0);
 		gBufferRender(true);
 		//blend geometry
+		renderPaintTarget();
 		lightingPass(true);
 
 
@@ -42444,6 +42748,7 @@ namespace gl3d
 
 		//gbuffer
 		internal.gBuffer.resize(internal.adaptiveW, internal.adaptiveH);
+		internal.paintTargetBuffer.resize(internal.adaptiveW, internal.adaptiveH);
 
 		//ssao and hbao
 		internal.ssao.resize(internal.adaptiveW, internal.adaptiveH);
@@ -42458,6 +42763,7 @@ namespace gl3d
 
 	void Renderer3D::clearAllLoadedResource()
 	{
+		internal.paintTargetEntity = {};
 
 	#pragma region skyboxes
 		skyBox.clearTextures();
@@ -42537,6 +42843,7 @@ namespace gl3d
 
 		internal.showNormalsProgram.shader.clear();
 
+		internal.paintTargetBuffer.clear();
 		internal.gBuffer.clear();
 		internal.ssao.clear();
 		internal.hbao.clear();
@@ -43458,6 +43765,52 @@ namespace gl3d
 		glDeleteFramebuffers(1, &gBuffer);
 		glDeleteTextures(bufferCount, buffers);
 		glDeleteTextures(1, &depthBuffer);
+	}
+
+	void Renderer3D::InternalStruct::PaintTargetBuffer::create(int w, int h, ErrorReporter &errorReporter, GLuint frameBuffer, GLuint sharedDepthBuffer)
+	{
+		glGenFramebuffers(1, &framebuffer);
+		glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+
+		glGenTextures(1, &colorBuffer);
+		glBindTexture(GL_TEXTURE_2D, colorBuffer);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32UI, 1, 1, 0, GL_RG_INTEGER, GL_UNSIGNED_INT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorBuffer, 0);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sharedDepthBuffer, 0);
+
+		unsigned int attachments[1] = {GL_COLOR_ATTACHMENT0};
+		glDrawBuffers(1, attachments);
+
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		{
+			errorReporter.callErrorCallback("Paint target buffer failed");
+		}
+
+		glBindFramebuffer(GL_FRAMEBUFFER, frameBuffer);
+		resize(w, h);
+	}
+
+	void Renderer3D::InternalStruct::PaintTargetBuffer::resize(int w, int h)
+	{
+		if (currentDimensions.x != w || currentDimensions.y != h)
+		{
+			glBindTexture(GL_TEXTURE_2D, colorBuffer);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32UI, w, h, 0, GL_RG_INTEGER, GL_UNSIGNED_INT, nullptr);
+			currentDimensions = glm::ivec2(w, h);
+		}
+	}
+
+	void Renderer3D::InternalStruct::PaintTargetBuffer::clear()
+	{
+		glDeleteFramebuffers(1, &framebuffer);
+		glDeleteTextures(1, &colorBuffer);
+		framebuffer = 0;
+		colorBuffer = 0;
+		currentDimensions = {};
 	}
 
 	void Renderer3D::InternalStruct::HBAO::create(ErrorReporter &errorReporter, FileOpener &fileOpener)

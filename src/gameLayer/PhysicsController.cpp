@@ -55,7 +55,9 @@ namespace
 	constexpr float cCharacterRadiusStanding = 0.30f;
 	constexpr float cWalkSpeed = 9.0f;
 	constexpr float cRunSpeed = 17.0f;
-	constexpr float cJumpSpeed = 5.5f;
+	constexpr float cJumpSpeed = 7.25f;
+	constexpr float cRiseGravityMultiplier = 1.2f;
+	constexpr float cFallGravityMultiplier = 2.1f;
 	constexpr float cSpawnHeightOffset = 0.15f;
 
 	void TraceImpl(const char *inFMT, ...)
@@ -475,6 +477,7 @@ void PhysicsController::update(float deltaTime, const PhysicsControllerInput &in
 	const Vec3 groundVelocity = character->GetGroundVelocity();
 	const Vec3 desiredHorizontalVelocity = character->CancelVelocityTowardsSteepSlopes(
 		toJolt(input.moveDirection) * (input.wantsToRun ? cRunSpeed : cWalkSpeed));
+	const Vec3 gravity = physicsSystem_->GetGravity();
 
 	Vec3 newVelocity = currentVerticalVelocity;
 	const bool isOnGround = character->GetGroundState() == CharacterBase::EGroundState::OnGround;
@@ -490,7 +493,14 @@ void PhysicsController::update(float deltaTime, const PhysicsControllerInput &in
 		}
 	}
 
-	newVelocity += physicsSystem_->GetGravity() * deltaTime;
+	float gravityScale = 1.0f;
+	if (!isOnGround)
+	{
+		const float verticalSpeedAlongUp = currentVelocity.Dot(up);
+		gravityScale = verticalSpeedAlongUp > 0.0f ? cRiseGravityMultiplier : cFallGravityMultiplier;
+	}
+
+	newVelocity += gravity * (deltaTime * gravityScale);
 	newVelocity += desiredHorizontalVelocity;
 
 	character->SetLinearVelocity(newVelocity);

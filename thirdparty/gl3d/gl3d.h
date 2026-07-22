@@ -152,6 +152,13 @@ namespace gl3d
 		};
 	};
 
+	struct PaintTargetSample
+	{
+		int meshIndex = -1;
+		glm::ivec2 texturePixel = {-1, -1};
+		glm::ivec2 textureSize = {};
+	};
+
 	//todo move
 	namespace internal
 	{
@@ -34077,6 +34084,20 @@ namespace gl3d
 			GLuint u_jointTransforms = GL_INVALID_INDEX;
 		}prePass;
 
+		struct
+		{
+			Shader shader;
+			GLint u_transform;
+			GLint u_modelTransform;
+			GLint u_motelViewTransform;
+			GLint u_hasAnimations;
+			GLint u_materialIndex;
+			GLint u_meshIndex;
+			GLint u_textureSize;
+			GLuint u_jointTransforms = GL_INVALID_INDEX;
+			GLuint materialBlockLocation = GL_INVALID_INDEX;
+		}paintTargetShader;
+
 		Shader geometryPassShader;
 		Shader lightingPassShader;
 
@@ -34808,6 +34829,9 @@ namespace gl3d
 		
 		TextureDataForMaterial getEntityMeshMaterialTextures(Entity& e, int meshIndex);
 		void setEntityMeshMaterialTextures(Entity& e, int meshIndex, TextureDataForMaterial texture);
+		void setEntityPaintTarget(Entity& e);
+		void clearEntityPaintTarget();
+		bool sampleEntityPaintTarget(glm::ivec2 screenPosition, PaintTargetSample &sample);
 
 	#pragma endregion
 
@@ -35125,6 +35149,19 @@ namespace gl3d
 				glm::ivec2 currentDimensions = {};
 
 			}gBuffer;
+
+			struct PaintTargetBuffer
+			{
+				void create(int w, int h, ErrorReporter &errorReporter, GLuint frameBuffer, GLuint sharedDepthBuffer);
+				void resize(int w, int h);
+				void clear();
+
+				unsigned int framebuffer = 0;
+				unsigned int colorBuffer = 0;
+				glm::ivec2 currentDimensions = {};
+			}paintTargetBuffer;
+
+			Entity paintTargetEntity = {};
 
 			#pragma endregion
 
