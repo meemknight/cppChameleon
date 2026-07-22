@@ -1,0 +1,10 @@
+/out
+bin/
+build/
+/.vs
+.idea/
+/.agents
+CMakeSettings.json
+Makefile
+
+logs.txt
