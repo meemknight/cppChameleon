@@ -60,7 +60,13 @@ float thirdPersonPitch = glm::radians(-18.0f);
 float thirdPersonCameraDistance = THIRD_PERSON_CAMERA_DISTANCE_DEFAULT;
 bool paintModeActive = false;
 std::vector<PlayerPaintTexture> playerPaintTextures;
-constexpr int PLAYER_PAINT_BRUSH_RADIUS = 6;
+constexpr int PLAYER_PAINT_BRUSH_RADIUS_DEFAULT = 6;
+constexpr int PLAYER_PAINT_BRUSH_RADIUS_MIN = 1;
+constexpr int PLAYER_PAINT_BRUSH_RADIUS_MAX = 96;
+constexpr float PLAYER_PAINT_BRUSH_RESIZE_SPEED = 0.12f;
+constexpr float PLAYER_PAINT_BRUSH_PREVIEW_SCALE = 2.4f;
+int playerPaintBrushRadius = PLAYER_PAINT_BRUSH_RADIUS_DEFAULT;
+float playerPaintBrushRadiusPrecise = static_cast<float>(PLAYER_PAINT_BRUSH_RADIUS_DEFAULT);
 
 struct PaintDebugState
 {
@@ -68,11 +74,14 @@ struct PaintDebugState
 	gl3d::PaintTargetSample hoverSample = {};
 	bool clickValid = false;
 	gl3d::PaintTargetSample clickSample = {};
+	bool brushResizeActive = false;
 	glm::ivec2 windowMousePosition = {};
 	glm::ivec2 framebufferMousePosition = {};
 };
 
 PaintDebugState paintDebugState;
+bool hasLastPaintStrokeScreenPosition = false;
+glm::ivec2 lastPaintStrokeScreenPosition = {};
 
 #define USE_GPU 1
 
@@ -111,6 +120,35 @@ glm::vec2 consumeLookDelta(glm::vec2 &lastMousePos, bool captureMouse)
 		platform::loseFocus();
 	}
 
+	return delta;
+}
+
+glm::vec2 consumeMouseDragDelta(glm::vec2 &lastMousePos, bool dragActive)
+{
+	glm::vec2 currentMousePos = platform::getRelMousePosition();
+	glm::vec2 delta = {};
+
+	if (platform::hasFocused() && dragActive)
+	{
+		constexpr float lookSpeed = 0.2f * (1.0f / 60.0f);
+		delta = (lastMousePos - currentMousePos) * lookSpeed;
+	}
+
+	lastMousePos = currentMousePos;
+	return delta;
+}
+
+glm::vec2 consumeRawMouseDragDelta(glm::vec2 &lastMousePos, bool dragActive)
+{
+	glm::vec2 currentMousePos = platform::getRelMousePosition();
+	glm::vec2 delta = {};
+
+	if (platform::hasFocused() && dragActive)
+	{
+		delta = currentMousePos - lastMousePos;
+	}
+
+	lastMousePos = currentMousePos;
 	return delta;
 }
 
@@ -339,6 +377,13 @@ PlayerPaintTexture *getPlayerPaintTexture(int meshIndex)
 	return nullptr;
 }
 
+bool isPaintBrushResizeActive(const platform::Input &input)
+{
+	return cameraMode == CameraMode::ThirdPerson
+		&& paintModeActive
+		&& input.rMouse.held;
+}
+
 glm::ivec2 getMouseFramebufferPosition(const platform::Input &input)
 {
 	const glm::ivec2 windowSize = platform::getWindowSize();
@@ -389,9 +434,9 @@ void uploadPlayerPaintTexture(PlayerPaintTexture &paintTexture)
 
 void paintTextureBlack(PlayerPaintTexture &paintTexture, glm::ivec2 center)
 {
-	for (int y = center.y - PLAYER_PAINT_BRUSH_RADIUS; y <= center.y + PLAYER_PAINT_BRUSH_RADIUS; ++y)
+	for (int y = center.y - playerPaintBrushRadius; y <= center.y + playerPaintBrushRadius; ++y)
 	{
-		for (int x = center.x - PLAYER_PAINT_BRUSH_RADIUS; x <= center.x + PLAYER_PAINT_BRUSH_RADIUS; ++x)
+		for (int x = center.x - playerPaintBrushRadius; x <= center.x + playerPaintBrushRadius; ++x)
 		{
 			if (x < 0 || y < 0 || x >= paintTexture.size.x || y >= paintTexture.size.y)
 			{
@@ -399,7 +444,7 @@ void paintTextureBlack(PlayerPaintTexture &paintTexture, glm::ivec2 center)
 			}
 
 			const glm::ivec2 delta = glm::ivec2(x, y) - center;
-			if (delta.x * delta.x + delta.y * delta.y > PLAYER_PAINT_BRUSH_RADIUS * PLAYER_PAINT_BRUSH_RADIUS)
+			if (delta.x * delta.x + delta.y * delta.y > playerPaintBrushRadius * playerPaintBrushRadius)
 			{
 				continue;
 			}
@@ -410,6 +455,63 @@ void paintTextureBlack(PlayerPaintTexture &paintTexture, glm::ivec2 center)
 			paintTexture.pixels[pixelIndex + 2] = 0;
 		}
 	}
+}
+
+void resetPaintStrokeState()
+{
+	hasLastPaintStrokeScreenPosition = false;
+	lastPaintStrokeScreenPosition = {};
+}
+
+bool paintInterpolatedStrokeScreenSpace(glm::ivec2 fromScreenPosition,
+	glm::ivec2 toScreenPosition,
+	gl3d::PaintTargetSample &lastSuccessfulSample)
+{
+	lastSuccessfulSample = {};
+
+	const float previewRadius = (std::max)(
+		1.0f,
+		static_cast<float>(playerPaintBrushRadius) * PLAYER_PAINT_BRUSH_PREVIEW_SCALE);
+	const float stepDistance = (std::max)(1.0f, previewRadius);
+	const glm::vec2 from = glm::vec2(fromScreenPosition);
+	const glm::vec2 to = glm::vec2(toScreenPosition);
+	const float distance = glm::distance(from, to);
+	const int interpolationSteps = (std::max)(1, static_cast<int>(std::ceil(distance / stepDistance)));
+	std::vector<PlayerPaintTexture *> touchedTextures;
+	bool paintedAny = false;
+
+	for (int step = 0; step <= interpolationSteps; ++step)
+	{
+		const float t = static_cast<float>(step) / static_cast<float>(interpolationSteps);
+		const glm::ivec2 interpolatedScreenPosition = glm::ivec2(glm::round(glm::mix(from, to, t)));
+		gl3d::PaintTargetSample sample = {};
+		if (!renderer3D.sampleEntityPaintTarget(interpolatedScreenPosition, sample))
+		{
+			continue;
+		}
+
+		PlayerPaintTexture *paintTexture = getPlayerPaintTexture(sample.meshIndex);
+		if (paintTexture == nullptr)
+		{
+			continue;
+		}
+
+		paintTextureBlack(*paintTexture, sample.texturePixel);
+		if (std::find(touchedTextures.begin(), touchedTextures.end(), paintTexture) == touchedTextures.end())
+		{
+			touchedTextures.push_back(paintTexture);
+		}
+
+		paintedAny = true;
+		lastSuccessfulSample = sample;
+	}
+
+	for (PlayerPaintTexture *paintTexture : touchedTextures)
+	{
+		uploadPlayerPaintTexture(*paintTexture);
+	}
+
+	return paintedAny;
 }
 
 void setupPlayerPaintTextures()
@@ -441,47 +543,109 @@ void setupPlayerPaintTextures()
 	renderer3D.setEntityPaintTarget(playerEntity);
 }
 
+void updatePaintBrushSize(const platform::Input &input)
+{
+	paintDebugState.brushResizeActive = isPaintBrushResizeActive(input);
+
+	static glm::vec2 lastPaintBrushResizeMousePosition = {};
+	const glm::vec2 resizeDelta = consumeRawMouseDragDelta(
+		lastPaintBrushResizeMousePosition,
+		paintDebugState.brushResizeActive);
+
+	if (!paintDebugState.brushResizeActive)
+	{
+		return;
+	}
+
+	playerPaintBrushRadiusPrecise = std::clamp(
+		playerPaintBrushRadiusPrecise + resizeDelta.x * PLAYER_PAINT_BRUSH_RESIZE_SPEED,
+		static_cast<float>(PLAYER_PAINT_BRUSH_RADIUS_MIN),
+		static_cast<float>(PLAYER_PAINT_BRUSH_RADIUS_MAX));
+	playerPaintBrushRadius = static_cast<int>(std::round(playerPaintBrushRadiusPrecise));
+}
+
 void paintPlayerFromCursor(platform::Input &input)
 {
 	paintDebugState.hoverValid = false;
+	paintDebugState.clickValid = false;
 
+	if (!paintModeActive || cameraMode != CameraMode::ThirdPerson)
+	{
+		resetPaintStrokeState();
+		return;
+	}
+
+	const glm::ivec2 currentScreenPosition = getMouseFramebufferPosition(input);
+	gl3d::PaintTargetSample hoverSample = {};
+	if (!renderer3D.sampleEntityPaintTarget(currentScreenPosition, hoverSample))
+	{
+		paintDebugState.hoverValid = false;
+	}
+	else
+	{
+		paintDebugState.hoverValid = true;
+		paintDebugState.hoverSample = hoverSample;
+	}
+
+	if (paintDebugState.brushResizeActive)
+	{
+		resetPaintStrokeState();
+		return;
+	}
+
+	if (!input.isLMouseHeld())
+	{
+		resetPaintStrokeState();
+		return;
+	}
+
+	const glm::ivec2 strokeStartPosition = hasLastPaintStrokeScreenPosition
+		? lastPaintStrokeScreenPosition
+		: currentScreenPosition;
+
+	gl3d::PaintTargetSample lastSuccessfulSample = {};
+	paintDebugState.clickValid = paintInterpolatedStrokeScreenSpace(
+		strokeStartPosition,
+		currentScreenPosition,
+		lastSuccessfulSample);
+	if (paintDebugState.clickValid)
+	{
+		paintDebugState.clickSample = lastSuccessfulSample;
+	}
+
+	hasLastPaintStrokeScreenPosition = true;
+	lastPaintStrokeScreenPosition = currentScreenPosition;
+}
+
+void renderPaintBrushOverlay(const platform::Input &input)
+{
 	if (!paintModeActive || cameraMode != CameraMode::ThirdPerson)
 	{
 		return;
 	}
 
-	gl3d::PaintTargetSample sample = {};
-	if (!renderer3D.sampleEntityPaintTarget(getMouseFramebufferPosition(input), sample))
+	const glm::vec2 mousePosition = glm::vec2(getMouseFramebufferPosition(input));
+	const float previewRadius = (std::max)(
+		8.0f,
+		static_cast<float>(playerPaintBrushRadius) * PLAYER_PAINT_BRUSH_PREVIEW_SCALE);
+
+	gl2d::Color4f brushColor = paintDebugState.hoverValid
+		? gl2d::Color4f{1.0f, 1.0f, 1.0f, 0.95f}
+		: gl2d::Color4f{1.0f, 0.35f, 0.35f, 0.95f};
+
+	if (paintDebugState.brushResizeActive)
 	{
-		paintDebugState.clickValid = false;
-		return;
+		brushColor = {1.0f, 0.85f, 0.2f, 0.98f};
 	}
 
-	paintDebugState.hoverValid = true;
-	paintDebugState.hoverSample = sample;
-
-	if (!input.isLMouseHeld())
-	{
-		return;
-	}
-
-	PlayerPaintTexture *paintTexture = getPlayerPaintTexture(sample.meshIndex);
-	if (paintTexture == nullptr)
-	{
-		paintDebugState.clickValid = false;
-		return;
-	}
-
-	paintTextureBlack(*paintTexture, sample.texturePixel);
-	uploadPlayerPaintTexture(*paintTexture);
-	paintDebugState.clickValid = true;
-	paintDebugState.clickSample = sample;
+	renderer.renderCircleOutline(mousePosition, previewRadius + 1.0f, {0.0f, 0.0f, 0.0f, 0.9f}, 3.0f, 40);
+	renderer.renderCircleOutline(mousePosition, previewRadius, brushColor, 2.0f, 40);
 }
 
-void updateThirdPersonCameraZoom()
+void updateThirdPersonCameraZoom(bool ignoreImguiCapture = false)
 {
 	ImGuiIO &io = ImGui::GetIO();
-	if (io.WantCaptureMouse || std::abs(io.MouseWheel) < 0.001f)
+	if ((!ignoreImguiCapture && io.WantCaptureMouse) || std::abs(io.MouseWheel) < 0.001f)
 	{
 		return;
 	}
@@ -516,7 +680,7 @@ bool initGame()
 	renderer3D.skyBox = renderer3D.loadHDRSkyBox(RESOURCES_PATH "sky.hdr");
 	//renderer3D.skyBox.color = glm::vec4{0.8,0.8, 0.8,1};
 
-	playerModel = renderer3D.loadModel(RESOURCES_PATH "player2.glb", gl3d::maxQuality, 1);
+	playerModel = renderer3D.loadModel(RESOURCES_PATH "player3.glb", gl3d::maxQuality, 1);
 
 
 	playerEntity = renderer3D.createEntity(playerModel, {}, false, true, false);
@@ -610,21 +774,42 @@ bool gameLogic(float deltaTime, platform::Input &input)
 		paintModeActive = !paintModeActive;
 	}
 
+	updatePaintBrushSize(input);
+
 	const bool captureMouseLook = cameraMode == CameraMode::Free || !paintModeActive;
 	static glm::vec2 lastMousePosition = {};
+	static glm::vec2 lastPaintOrbitMousePosition = {};
 	const glm::vec2 lookDelta = consumeLookDelta(lastMousePosition, captureMouseLook);
+	const glm::vec2 paintOrbitDelta = consumeMouseDragDelta(
+		lastPaintOrbitMousePosition,
+		cameraMode == CameraMode::ThirdPerson && paintModeActive && input.isMMouseHeld());
 
 	PhysicsControllerInput playerInput = {};
 	if (cameraMode == CameraMode::Free)
 	{
 		applyFreeCameraInput(renderer3D, 20.0f, deltaTime, lookDelta);
 	}
-	else if (!paintModeActive)
+	else
 	{
-		thirdPersonYaw -= lookDelta.x;
-		thirdPersonPitch = std::clamp(thirdPersonPitch + lookDelta.y, THIRD_PERSON_PITCH_MIN, THIRD_PERSON_PITCH_MAX);
-		updateThirdPersonCameraZoom();
-		playerInput = buildPlayerInput();
+		if (paintModeActive)
+		{
+			thirdPersonYaw -= paintOrbitDelta.x;
+			thirdPersonPitch = std::clamp(
+				thirdPersonPitch + paintOrbitDelta.y,
+				THIRD_PERSON_PITCH_MIN,
+				THIRD_PERSON_PITCH_MAX);
+			updateThirdPersonCameraZoom(true);
+		}
+		else
+		{
+			thirdPersonYaw -= lookDelta.x;
+			thirdPersonPitch = std::clamp(
+				thirdPersonPitch + lookDelta.y,
+				THIRD_PERSON_PITCH_MIN,
+				THIRD_PERSON_PITCH_MAX);
+			updateThirdPersonCameraZoom();
+			playerInput = buildPlayerInput();
+		}
 	}
 
 	playerPhysics.update(deltaTime, playerInput);
@@ -638,6 +823,7 @@ bool gameLogic(float deltaTime, platform::Input &input)
 
 	renderer3D.render(deltaTime);
 	paintPlayerFromCursor(input);
+	renderPaintBrushOverlay(input);
 
 
 	renderer.flush();
@@ -674,7 +860,8 @@ bool gameLogic(float deltaTime, platform::Input &input)
 		ImGui::Text("Free camera: WASD + Q/E");
 		ImGui::Text("Player: WASD move, Shift run, Space jump");
 		ImGui::Text("Paint mode: %s", paintModeActive ? "On" : "Off");
-		ImGui::Text("Paint: F toggle, Left click to paint black");
+		ImGui::Text("Paint: F toggle, Left click paint, Right drag resize, Middle drag orbit, Scroll zoom");
+		ImGui::Text("Paint brush radius: %d%s", playerPaintBrushRadius, paintDebugState.brushResizeActive ? " (resizing)" : "");
 		ImGui::Text("Paint textures: %d", static_cast<int>(playerPaintTextures.size()));
 		ImGui::Text(
 			"Mouse window %d,%d framebuffer %d,%d",

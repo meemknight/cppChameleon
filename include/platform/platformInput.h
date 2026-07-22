@@ -103,6 +103,7 @@ namespace platform
 		//typed input doesn't work with mouse buttons
 		Button lMouse = {};
 		Button rMouse = {};
+		Button mMouse = {};
 
 		//mouse position relative to window
 		int mouseX = 0;
@@ -125,12 +126,15 @@ namespace platform
 
 		int isLMousePressed() { return lMouse.pressed; };
 		int isRMousePressed() { return rMouse.pressed; };
+		int isMMousePressed() { return mMouse.pressed; };
 
 		int isLMouseReleased() { return lMouse.released; };
 		int isRMouseReleased() { return rMouse.released; };
+		int isMMouseReleased() { return mMouse.released; };
 
 		int isLMouseHeld() { return lMouse.held; };
 		int isRMouseHeld() { return rMouse.held; };
+		int isMMouseHeld() { return mMouse.held; };
 	};
 
 	
@@ -138,6 +142,7 @@ namespace platform
 
 	platform::Button &getLMouseButton();
 	platform::Button &getRMouseButton();
+	platform::Button &getMMouseButton();
 
 
 	int isButtonHeld(int key);
@@ -147,12 +152,15 @@ namespace platform
 
 	int isLMousePressed();
 	int isRMousePressed();
+	int isMMousePressed();
 
 	int isLMouseReleased();
 	int isRMouseReleased();
+	int isMMouseReleased();
 
 	int isLMouseHeld();
 	int isRMouseHeld();
+	int isMMouseHeld();
 
 	Controller getControllerButtons();
 	std::string getTypedInput();
@@ -164,6 +172,7 @@ namespace platform
 
 		void setLeftMouseState(int newState);
 		void setRightMouseState(int newState);
+		void setMiddleMouseState(int newState);
 
 		inline void processEventButton(Button &b, bool newState)
 		{

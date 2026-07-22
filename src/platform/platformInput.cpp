@@ -4,6 +4,7 @@
 platform::Button keyBoard[platform::Button::BUTTONS_COUNT];
 platform::Button leftMouse;
 platform::Button rightMouse;
+platform::Button middleMouse;
 
 platform::Controller controllerButtons;
 std::string typedInput;
@@ -21,6 +22,11 @@ platform::Button &platform::getLMouseButton()
 platform::Button &platform::getRMouseButton()
 {
 	return rightMouse;
+}
+
+platform::Button &platform::getMMouseButton()
+{
+	return middleMouse;
 }
 
 int platform::isButtonHeld(int key)
@@ -61,6 +67,11 @@ int platform::isRMousePressed()
 	return rightMouse.pressed;
 }
 
+int platform::isMMousePressed()
+{
+	return middleMouse.pressed;
+}
+
 int platform::isLMouseReleased()
 {
 	return leftMouse.released;
@@ -69,6 +80,11 @@ int platform::isLMouseReleased()
 int platform::isRMouseReleased()
 {
 	return rightMouse.released;
+}
+
+int platform::isMMouseReleased()
+{
+	return middleMouse.released;
 }
 
 
@@ -80,6 +96,11 @@ int platform::isLMouseHeld()
 int platform::isRMouseHeld()
 {
 	return rightMouse.held;
+}
+
+int platform::isMMouseHeld()
+{
+	return middleMouse.held;
 }
 
 platform::Controller platform::getControllerButtons()
@@ -111,6 +132,11 @@ void platform::internal::setRightMouseState(int newState)
 
 }
 
+void platform::internal::setMiddleMouseState(int newState)
+{
+	processEventButton(middleMouse, newState);
+}
+
 
 void platform::internal::updateAllButtons(float deltaTime)
 {
@@ -121,6 +147,7 @@ void platform::internal::updateAllButtons(float deltaTime)
 
 	updateButton(leftMouse, deltaTime);
 	updateButton(rightMouse, deltaTime);
+	updateButton(middleMouse, deltaTime);
 	
 	for(int i=0; i<=GLFW_JOYSTICK_LAST; i++)
 	{
@@ -172,6 +199,7 @@ void platform::internal::resetInputsToZero()
 
 	resetButtonToZero(leftMouse);
 	resetButtonToZero(rightMouse);
+	resetButtonToZero(middleMouse);
 	
 	controllerButtons.setAllToZero();
 }

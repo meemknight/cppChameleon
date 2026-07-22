@@ -160,6 +160,10 @@ void mouseCallback(GLFWwindow *window, int key, int action, int mods)
 	if (key == GLFW_MOUSE_BUTTON_RIGHT)
 	{
 		platform::internal::setRightMouseState(state);
+	}else
+	if (key == GLFW_MOUSE_BUTTON_MIDDLE)
+	{
+		platform::internal::setMiddleMouseState(state);
 	}
 	
 
@@ -638,6 +642,7 @@ int main()
 		input.mouseY = platform::getRelMousePosition().y;
 		input.lMouse = platform::getLMouseButton();
 		input.rMouse = platform::getRMouseButton();
+		input.mMouse = platform::getMMouseButton();
 		strlcpy(input.typedInput, platform::getTypedInput(), sizeof(input.typedInput));
 
 		if (!gameLogic(augmentedDeltaTime, input))
