@@ -24,6 +24,7 @@ struct PhysicsControllerInput
 	glm::vec3 moveDirection = {};
 	bool wantsToRun = false;
 	bool wantsToJump = false;
+	bool wantsToClimb = false;
 };
 
 class PhysicsController
@@ -45,6 +46,7 @@ public:
 	glm::vec3 getPlayerVelocity() const;
 	float getPlayerYaw() const;
 	bool isGrounded() const;
+	bool isWallAttached() const;
 
 private:
 	bool initialized_ = false;
@@ -61,4 +63,5 @@ private:
 	JPH::BodyID mapBodyId_;
 	JPH::RefConst<JPH::Shape> standingShape_;
 	float facingYaw_ = 0.0f;
+	bool wallAttached_ = false;
 };

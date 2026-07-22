@@ -58,6 +58,9 @@ namespace
 	constexpr float cJumpSpeed = 7.25f;
 	constexpr float cRiseGravityMultiplier = 1.2f;
 	constexpr float cFallGravityMultiplier = 2.1f;
+	constexpr float cWallAttachMaxUpDot = 0.28f;
+	constexpr float cWallStickInwardSpeed = 1.5f;
+	constexpr float cWallClimbSpeed = 5.5f;
 	constexpr float cSpawnHeightOffset = 0.15f;
 
 	void TraceImpl(const char *inFMT, ...)
@@ -250,6 +253,32 @@ namespace
 		const glm::vec3 boundsCenter = (minBounds + maxBounds) * 0.5f;
 		return {boundsCenter.x, maxBounds.y + cSpawnHeightOffset, boundsCenter.z};
 	}
+
+	bool tryGetWallContact(const CharacterVirtual &character, Vec3 &outWallNormal)
+	{
+		const CharacterBase::EGroundState groundState = character.GetGroundState();
+		if (groundState == CharacterBase::EGroundState::InAir
+			|| groundState == CharacterBase::EGroundState::OnGround)
+		{
+			return false;
+		}
+
+		Vec3 wallNormal = character.GetGroundNormal();
+		if (wallNormal.LengthSq() <= 1.0e-6f)
+		{
+			return false;
+		}
+
+		wallNormal = wallNormal.Normalized();
+		const float upDot = wallNormal.Dot(character.GetUp());
+		if (std::abs(upDot) > cWallAttachMaxUpDot)
+		{
+			return false;
+		}
+
+		outWallNormal = wallNormal;
+		return true;
+	}
 }
 
 PhysicsController::PhysicsController() = default;
@@ -378,6 +407,7 @@ void PhysicsController::shutdown()
 	broadPhaseLayerInterface_.reset();
 	standingShape_ = nullptr;
 	facingYaw_ = 0.0f;
+	wallAttached_ = false;
 	initialized_ = false;
 
 	if (Factory::sInstance != nullptr)
@@ -475,39 +505,60 @@ void PhysicsController::update(float deltaTime, const PhysicsControllerInput &in
 	const Vec3 currentVelocity = character->GetLinearVelocity();
 	const Vec3 currentVerticalVelocity = currentVelocity.Dot(up) * up;
 	const Vec3 groundVelocity = character->GetGroundVelocity();
-	const Vec3 desiredHorizontalVelocity = character->CancelVelocityTowardsSteepSlopes(
+	Vec3 desiredHorizontalVelocity = character->CancelVelocityTowardsSteepSlopes(
 		toJolt(input.moveDirection) * (input.wantsToRun ? cRunSpeed : cWalkSpeed));
 	const Vec3 gravity = physicsSystem_->GetGravity();
+	Vec3 wallNormal = Vec3::sZero();
+	const bool hasWallContact = tryGetWallContact(*character, wallNormal);
 
 	Vec3 newVelocity = currentVerticalVelocity;
 	const bool isOnGround = character->GetGroundState() == CharacterBase::EGroundState::OnGround;
 	const bool movingTowardsGround = (currentVerticalVelocity.GetY() - groundVelocity.GetY()) < 0.1f;
+	wallAttached_ = false;
 
 	if (isOnGround && movingTowardsGround)
 	{
-		newVelocity = groundVelocity;
+		newVelocity = groundVelocity + desiredHorizontalVelocity;
 
 		if (input.wantsToJump)
 		{
 			newVelocity += up * cJumpSpeed;
 		}
 	}
-
-	float gravityScale = 1.0f;
-	if (!isOnGround)
+	else if (hasWallContact)
 	{
+		wallAttached_ = true;
+		desiredHorizontalVelocity -= desiredHorizontalVelocity.Dot(wallNormal) * wallNormal;
+		newVelocity = desiredHorizontalVelocity - wallNormal * cWallStickInwardSpeed;
+
+		if (input.wantsToClimb)
+		{
+			newVelocity += up * cWallClimbSpeed;
+		}
+		else if (input.wantsToRun)
+		{
+			newVelocity -= up * cWallClimbSpeed;
+		}
+	}
+	else
+	{
+		float gravityScale = 1.0f;
 		const float verticalSpeedAlongUp = currentVelocity.Dot(up);
 		gravityScale = verticalSpeedAlongUp > 0.0f ? cRiseGravityMultiplier : cFallGravityMultiplier;
-	}
 
-	newVelocity += gravity * (deltaTime * gravityScale);
-	newVelocity += desiredHorizontalVelocity;
+		newVelocity += gravity * (deltaTime * gravityScale);
+		newVelocity += desiredHorizontalVelocity;
+	}
 
 	character->SetLinearVelocity(newVelocity);
 
 	if (glm::length(input.moveDirection) > 0.001f)
 	{
 		facingYaw_ = std::atan2(input.moveDirection.x, input.moveDirection.z);
+	}
+	else if (wallAttached_)
+	{
+		facingYaw_ = std::atan2(-wallNormal.GetX(), -wallNormal.GetZ());
 	}
 	else
 	{
@@ -525,10 +576,13 @@ void PhysicsController::update(float deltaTime, const PhysicsControllerInput &in
 	updateSettings.mWalkStairsStepUp = Vec3(0.0f, 0.4f, 0.0f);
 	updateSettings.mWalkStairsMinStepForward = 0.02f;
 	updateSettings.mWalkStairsStepForwardTest = 0.15f;
+	const Vec3 extendedUpdateGravity = wallAttached_
+		? Vec3::sZero()
+		: -up * physicsSystem_->GetGravity().Length();
 
 	character->ExtendedUpdate(
 		deltaTime,
-		-up * physicsSystem_->GetGravity().Length(),
+		extendedUpdateGravity,
 		updateSettings,
 		physicsSystem_->GetDefaultBroadPhaseLayerFilter(cMovingLayer),
 		physicsSystem_->GetDefaultLayerFilter(cMovingLayer),
@@ -578,4 +632,9 @@ bool PhysicsController::isGrounded() const
 	}
 
 	return character_->GetGroundState() == CharacterBase::EGroundState::OnGround;
+}
+
+bool PhysicsController::isWallAttached() const
+{
+	return wallAttached_;
 }

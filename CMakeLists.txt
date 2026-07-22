@@ -68,6 +68,7 @@ add_subdirectory(thirdparty/glm)				#math
 add_subdirectory(thirdparty/imgui-docking)		#ui
 add_subdirectory(thirdparty/gl2d)				#2D rendering library
 add_subdirectory(thirdparty/gl3d)				#3D
+add_subdirectory(thirdparty/glui)				
 add_subdirectory(thirdparty/JoltPhysics/Build)	#physics
 
 
@@ -126,4 +127,5 @@ target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE
 	gl2d
 	imgui
 	Jolt
+	glui
 )
