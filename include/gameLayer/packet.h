@@ -2,6 +2,12 @@
 #include <cstdint>
 #include <enet/enet.h>
 
+#define SERVER_CHANNELS 2
+
+#define CHANNEL_CONNECTIONS 0
+#define CHANNEL_GAMEPLAY 1
+
+
 struct Packet
 {
 	std::uint64_t cid = 0;
@@ -23,11 +29,15 @@ struct Packet
 enum: std::uint32_t
 {
 	headerNone = 0,
+	headerReceiveCIDAndData,
 
 };
 
 
-
+struct Packet_ReceiveCIDAndData
+{
+	std::uint64_t yourCID = 0;
+};
 
 void *unCompressData(const char *data, size_t compressedSize, size_t &originalSize);
 

@@ -47,44 +47,11 @@ namespace
 	constexpr float PAINT_COLOR_SLIDER_HEIGHT = 18.0f;
 	constexpr float PAINT_COLOR_SLIDER_SEGMENTS = 40.0f;
 
-	ClientGameplay *gClientGameplay = nullptr;
-
-	ClientGameplay &gameplay()
-	{
-		return *gClientGameplay;
-	}
-
 	using PlayerPaintTexture = ClientGameplay::PlayerPaintTexture;
 	using CameraMode = ClientGameplay::CameraMode;
 	using PaintColorSlider = ClientGameplay::PaintColorSlider;
 	using PaintDebugState = ClientGameplay::PaintDebugState;
 }
-
-#define renderer (*gameplay().renderer2D)
-#define paintUiFont gameplay().paintUiFont
-#define renderer3D gameplay().renderer3D
-#define playerModel gameplay().playerModel
-#define mapModel gameplay().mapModel
-#define playerEntity gameplay().playerEntity
-#define mapEntity gameplay().mapEntity
-#define playerPhysics gameplay().playerPhysics
-#define cameraMode gameplay().cameraMode
-#define thirdPersonYaw gameplay().thirdPersonYaw
-#define thirdPersonPitch gameplay().thirdPersonPitch
-#define thirdPersonCameraDistance gameplay().thirdPersonCameraDistance
-#define paintModeActive gameplay().paintModeActive
-#define playerPaintTextures gameplay().playerPaintTextures
-#define playerPaintBrushRadius gameplay().playerPaintBrushRadius
-#define playerPaintBrushRadiusPrecise gameplay().playerPaintBrushRadiusPrecise
-#define playerPaintColorHsv gameplay().playerPaintColorHsv
-#define paintColorPickModeActive gameplay().paintColorPickModeActive
-#define paintColorUiHovered gameplay().paintColorUiHovered
-#define paintColorUiCapturingMouse gameplay().paintColorUiCapturingMouse
-#define paintUiFontLoaded gameplay().paintUiFontLoaded
-#define activePaintColorSlider gameplay().activePaintColorSlider
-#define paintDebugState gameplay().paintDebugState
-#define hasLastPaintStrokeScreenPosition gameplay().hasLastPaintStrokeScreenPosition
-#define lastPaintStrokeScreenPosition gameplay().lastPaintStrokeScreenPosition
 
 #define USE_GPU 1
 
@@ -260,15 +227,23 @@ glm::vec3 getRightFromForward(glm::vec3 forward)
 	return right / rightLength;
 }
 
-void syncThirdPersonOrbitToCamera()
+void syncThirdPersonOrbitToCamera(ClientGameplay &gameplay)
 {
+	auto &renderer3D = gameplay.renderer3D;
+	auto &thirdPersonPitch = gameplay.thirdPersonPitch;
+	auto &thirdPersonYaw = gameplay.thirdPersonYaw;
+
 	const glm::vec3 viewDirection = glm::normalize(renderer3D.camera.viewDirection);
 	thirdPersonPitch = std::asin(std::clamp(viewDirection.y, -1.0f, 1.0f));
 	thirdPersonYaw = std::atan2(viewDirection.x, -viewDirection.z);
 }
 
-void setCameraMode(CameraMode newMode)
+void setCameraMode(ClientGameplay &gameplay, CameraMode newMode)
 {
+	auto &cameraMode = gameplay.cameraMode;
+	auto &paintModeActive = gameplay.paintModeActive;
+	auto &paintColorPickModeActive = gameplay.paintColorPickModeActive;
+
 	if (cameraMode == newMode)
 	{
 		return;
@@ -276,7 +251,7 @@ void setCameraMode(CameraMode newMode)
 
 	if (newMode == CameraMode::ThirdPerson)
 	{
-		syncThirdPersonOrbitToCamera();
+		syncThirdPersonOrbitToCamera(gameplay);
 	}
 	else
 	{
@@ -287,9 +262,9 @@ void setCameraMode(CameraMode newMode)
 	cameraMode = newMode;
 }
 
-void toggleCameraMode()
+void toggleCameraMode(ClientGameplay &gameplay)
 {
-	setCameraMode(cameraMode == CameraMode::Free ? CameraMode::ThirdPerson : CameraMode::Free);
+	setCameraMode(gameplay, gameplay.cameraMode == CameraMode::Free ? CameraMode::ThirdPerson : CameraMode::Free);
 }
 
 void applyFreeCameraInput(::gl3d::Renderer3D &rendererRef, float speed, float deltaTime, const glm::vec2 &lookDelta)
@@ -326,8 +301,10 @@ void applyFreeCameraInput(::gl3d::Renderer3D &rendererRef, float speed, float de
 	rendererRef.camera.rotateCamera(lookDelta);
 }
 
-PhysicsControllerInput buildPlayerInput()
+PhysicsControllerInput buildPlayerInput(ClientGameplay &gameplay)
 {
+	auto &thirdPersonYaw = gameplay.thirdPersonYaw;
+
 	PhysicsControllerInput result = {};
 
 	const glm::vec3 planarForward = getPlanarForward(
@@ -362,8 +339,12 @@ PhysicsControllerInput buildPlayerInput()
 	return result;
 }
 
-void syncPlayerEntityToPhysics()
+void syncPlayerEntityToPhysics(ClientGameplay &gameplay)
 {
+	auto &renderer3D = gameplay.renderer3D;
+	auto &playerEntity = gameplay.playerEntity;
+	auto &playerPhysics = gameplay.playerPhysics;
+
 	gl3d::Transform playerTransform = renderer3D.getEntityTransform(playerEntity);
 	playerTransform.position = playerPhysics.getPlayerPosition();
 	playerTransform.rotation = {};
@@ -371,8 +352,10 @@ void syncPlayerEntityToPhysics()
 	renderer3D.setEntityTransform(playerEntity, playerTransform);
 }
 
-bool copyTextureToCpu(gl3d::Texture texture, std::vector<unsigned char> &pixels, glm::ivec2 &size, int &quality)
+bool copyTextureToCpu(ClientGameplay &gameplay, gl3d::Texture texture, std::vector<unsigned char> &pixels, glm::ivec2 &size, int &quality)
 {
+	auto &renderer3D = gameplay.renderer3D;
+
 	gl3d::GpuTexture *gpuTexture = renderer3D.getTextureData(texture);
 	if (gpuTexture == nullptr || gpuTexture->id == 0)
 	{
@@ -418,8 +401,10 @@ void computeTextureAlphaFlags(const std::vector<unsigned char> &pixels, bool &al
 	}
 }
 
-gl3d::Texture createPaintTexture(const PlayerPaintTexture &paintTexture)
+gl3d::Texture createPaintTexture(ClientGameplay &gameplay, const PlayerPaintTexture &paintTexture)
 {
+	auto &renderer3D = gameplay.renderer3D;
+
 	bool alphaExists = false;
 	bool alphaHasData = false;
 	computeTextureAlphaFlags(paintTexture.pixels, alphaExists, alphaHasData);
@@ -439,8 +424,10 @@ gl3d::Texture createPaintTexture(const PlayerPaintTexture &paintTexture)
 		"playerPaintMesh" + std::to_string(paintTexture.meshIndex));
 }
 
-PlayerPaintTexture *getPlayerPaintTexture(int meshIndex)
+PlayerPaintTexture *getPlayerPaintTexture(ClientGameplay &gameplay, int meshIndex)
 {
+	auto &playerPaintTextures = gameplay.playerPaintTextures;
+
 	for (auto &paintTexture : playerPaintTextures)
 	{
 		if (paintTexture.meshIndex == meshIndex)
@@ -452,15 +439,19 @@ PlayerPaintTexture *getPlayerPaintTexture(int meshIndex)
 	return nullptr;
 }
 
-bool isPaintBrushResizeActive(const platform::Input &input)
+bool isPaintBrushResizeActive(ClientGameplay &gameplay, const platform::Input &input)
 {
+	auto &cameraMode = gameplay.cameraMode;
+	auto &paintModeActive = gameplay.paintModeActive;
+	auto &paintColorUiHovered = gameplay.paintColorUiHovered;
+
 	return cameraMode == CameraMode::ThirdPerson
 		&& paintModeActive
 		&& !paintColorUiHovered
 		&& input.rMouse.held;
 }
 
-glm::ivec2 getMouseFramebufferPosition(const platform::Input &input);
+glm::ivec2 getMouseFramebufferPosition(ClientGameplay &gameplay, const platform::Input &input);
 
 gl2d::Rect getPaintColorPanelRect()
 {
@@ -507,8 +498,10 @@ gl2d::Rect getPaintColorSliderRect(PaintColorSlider slider)
 	};
 }
 
-float *getPaintColorSliderValue(PaintColorSlider slider)
+float *getPaintColorSliderValue(ClientGameplay &gameplay, PaintColorSlider slider)
 {
+	auto &playerPaintColorHsv = gameplay.playerPaintColorHsv;
+
 	switch (slider)
 	{
 	case PaintColorSlider::Hue: return &playerPaintColorHsv.x;
@@ -518,9 +511,9 @@ float *getPaintColorSliderValue(PaintColorSlider slider)
 	}
 }
 
-void setPaintColorSliderValue(PaintColorSlider slider, float normalizedValue)
+void setPaintColorSliderValue(ClientGameplay &gameplay, PaintColorSlider slider, float normalizedValue)
 {
-	float *value = getPaintColorSliderValue(slider);
+	float *value = getPaintColorSliderValue(gameplay, slider);
 	if (value == nullptr)
 	{
 		return;
@@ -529,8 +522,15 @@ void setPaintColorSliderValue(PaintColorSlider slider, float normalizedValue)
 	*value = std::clamp(normalizedValue, 0.0f, 1.0f);
 }
 
-void updatePaintColorPicker(platform::Input &input)
+void updatePaintColorPicker(ClientGameplay &gameplay, platform::Input &input)
 {
+	auto &paintColorUiHovered = gameplay.paintColorUiHovered;
+	auto &paintColorUiCapturingMouse = gameplay.paintColorUiCapturingMouse;
+	auto &paintModeActive = gameplay.paintModeActive;
+	auto &cameraMode = gameplay.cameraMode;
+	auto &activePaintColorSlider = gameplay.activePaintColorSlider;
+	auto &paintColorPickModeActive = gameplay.paintColorPickModeActive;
+
 	paintColorUiHovered = false;
 	paintColorUiCapturingMouse = false;
 
@@ -541,7 +541,7 @@ void updatePaintColorPicker(platform::Input &input)
 		return;
 	}
 
-	const glm::vec2 mousePosition = glm::vec2(getMouseFramebufferPosition(input));
+	const glm::vec2 mousePosition = glm::vec2(getMouseFramebufferPosition(gameplay, input));
 	const gl2d::Rect panel = getPaintColorPanelRect();
 	paintColorUiHovered = pointInRect(mousePosition, panel);
 
@@ -580,15 +580,17 @@ void updatePaintColorPicker(platform::Input &input)
 		paintColorPickModeActive = false;
 		const gl2d::Rect sliderRect = getPaintColorSliderRect(activePaintColorSlider);
 		const float sliderValue = (mousePosition.x - sliderRect.x) / sliderRect.z;
-		setPaintColorSliderValue(activePaintColorSlider, sliderValue);
+		setPaintColorSliderValue(gameplay, activePaintColorSlider, sliderValue);
 	}
 
 	paintColorUiCapturingMouse = activePaintColorSlider != PaintColorSlider::None
 		|| (paintColorUiHovered && input.isLMouseHeld());
 }
 
-glm::vec3 getPaintColorSliderPreview(PaintColorSlider slider, float value)
+glm::vec3 getPaintColorSliderPreview(ClientGameplay &gameplay, PaintColorSlider slider, float value)
 {
+	auto &playerPaintColorHsv = gameplay.playerPaintColorHsv;
+
 	switch (slider)
 	{
 	case PaintColorSlider::Hue:
@@ -602,8 +604,10 @@ glm::vec3 getPaintColorSliderPreview(PaintColorSlider slider, float value)
 	}
 }
 
-glm::ivec2 getMouseFramebufferPosition(const platform::Input &input)
+glm::ivec2 getMouseFramebufferPosition(ClientGameplay &gameplay, const platform::Input &input)
 {
+	auto &paintDebugState = gameplay.paintDebugState;
+
 	const glm::ivec2 windowSize = platform::getWindowSize();
 	const glm::ivec2 framebufferSize = platform::getFrameBufferSize();
 
@@ -681,8 +685,10 @@ bool sampleVisibleScreenColor(glm::ivec2 screenPosition, glm::vec3 &sampledColor
 	return true;
 }
 
-void uploadPlayerPaintTexture(PlayerPaintTexture &paintTexture)
+void uploadPlayerPaintTexture(ClientGameplay &gameplay, PlayerPaintTexture &paintTexture)
 {
+	auto &renderer3D = gameplay.renderer3D;
+
 	gl3d::GpuTexture *gpuTexture = renderer3D.getTextureData(paintTexture.texture);
 	if (gpuTexture == nullptr || gpuTexture->id == 0)
 	{
@@ -708,8 +714,10 @@ void uploadPlayerPaintTexture(PlayerPaintTexture &paintTexture)
 	}
 }
 
-void paintTextureColor(PlayerPaintTexture &paintTexture, glm::ivec2 center, glm::vec3 color)
+void paintTextureColor(ClientGameplay &gameplay, PlayerPaintTexture &paintTexture, glm::ivec2 center, glm::vec3 color)
 {
+	auto &playerPaintBrushRadius = gameplay.playerPaintBrushRadius;
+
 	const unsigned char red = static_cast<unsigned char>(std::clamp(color.r * 255.0f, 0.0f, 255.0f));
 	const unsigned char green = static_cast<unsigned char>(std::clamp(color.g * 255.0f, 0.0f, 255.0f));
 	const unsigned char blue = static_cast<unsigned char>(std::clamp(color.b * 255.0f, 0.0f, 255.0f));
@@ -737,16 +745,24 @@ void paintTextureColor(PlayerPaintTexture &paintTexture, glm::ivec2 center, glm:
 	}
 }
 
-void resetPaintStrokeState()
+void resetPaintStrokeState(ClientGameplay &gameplay)
 {
+	auto &hasLastPaintStrokeScreenPosition = gameplay.hasLastPaintStrokeScreenPosition;
+	auto &lastPaintStrokeScreenPosition = gameplay.lastPaintStrokeScreenPosition;
+
 	hasLastPaintStrokeScreenPosition = false;
 	lastPaintStrokeScreenPosition = {};
 }
 
-bool paintInterpolatedStrokeScreenSpace(glm::ivec2 fromScreenPosition,
+bool paintInterpolatedStrokeScreenSpace(ClientGameplay &gameplay,
+	glm::ivec2 fromScreenPosition,
 	glm::ivec2 toScreenPosition,
 	gl3d::PaintTargetSample &lastSuccessfulSample)
 {
+	auto &playerPaintColorHsv = gameplay.playerPaintColorHsv;
+	auto &playerPaintBrushRadius = gameplay.playerPaintBrushRadius;
+	auto &renderer3D = gameplay.renderer3D;
+
 	lastSuccessfulSample = {};
 	const glm::vec3 paintColor = hsvToRgb(playerPaintColorHsv);
 
@@ -771,13 +787,13 @@ bool paintInterpolatedStrokeScreenSpace(glm::ivec2 fromScreenPosition,
 			continue;
 		}
 
-		PlayerPaintTexture *paintTexture = getPlayerPaintTexture(sample.meshIndex);
+		PlayerPaintTexture *paintTexture = getPlayerPaintTexture(gameplay, sample.meshIndex);
 		if (paintTexture == nullptr)
 		{
 			continue;
 		}
 
-		paintTextureColor(*paintTexture, sample.texturePixel, paintColor);
+		paintTextureColor(gameplay, *paintTexture, sample.texturePixel, paintColor);
 		if (std::find(touchedTextures.begin(), touchedTextures.end(), paintTexture) == touchedTextures.end())
 		{
 			touchedTextures.push_back(paintTexture);
@@ -789,14 +805,18 @@ bool paintInterpolatedStrokeScreenSpace(glm::ivec2 fromScreenPosition,
 
 	for (PlayerPaintTexture *paintTexture : touchedTextures)
 	{
-		uploadPlayerPaintTexture(*paintTexture);
+		uploadPlayerPaintTexture(gameplay, *paintTexture);
 	}
 
 	return paintedAny;
 }
 
-void setupPlayerPaintTextures()
+void setupPlayerPaintTextures(ClientGameplay &gameplay)
 {
+	auto &playerPaintTextures = gameplay.playerPaintTextures;
+	auto &renderer3D = gameplay.renderer3D;
+	auto &playerEntity = gameplay.playerEntity;
+
 	playerPaintTextures.clear();
 
 	const int meshCount = renderer3D.getEntityMeshesCount(playerEntity);
@@ -810,12 +830,12 @@ void setupPlayerPaintTextures()
 
 		PlayerPaintTexture paintTexture = {};
 		paintTexture.meshIndex = meshIndex;
-		if (!copyTextureToCpu(materialTextures.albedoTexture, paintTexture.pixels, paintTexture.size, paintTexture.quality))
+		if (!copyTextureToCpu(gameplay, materialTextures.albedoTexture, paintTexture.pixels, paintTexture.size, paintTexture.quality))
 		{
 			continue;
 		}
 
-		paintTexture.texture = createPaintTexture(paintTexture);
+		paintTexture.texture = createPaintTexture(gameplay, paintTexture);
 		materialTextures.albedoTexture = paintTexture.texture;
 		renderer3D.setEntityMeshMaterialTextures(playerEntity, meshIndex, materialTextures);
 		playerPaintTextures.push_back(std::move(paintTexture));
@@ -824,9 +844,13 @@ void setupPlayerPaintTextures()
 	renderer3D.setEntityPaintTarget(playerEntity);
 }
 
-void updatePaintBrushSize(const platform::Input &input)
+void updatePaintBrushSize(ClientGameplay &gameplay, const platform::Input &input)
 {
-	paintDebugState.brushResizeActive = isPaintBrushResizeActive(input);
+	auto &paintDebugState = gameplay.paintDebugState;
+	auto &playerPaintBrushRadiusPrecise = gameplay.playerPaintBrushRadiusPrecise;
+	auto &playerPaintBrushRadius = gameplay.playerPaintBrushRadius;
+
+	paintDebugState.brushResizeActive = isPaintBrushResizeActive(gameplay, input);
 
 	static glm::vec2 lastPaintBrushResizeMousePosition = {};
 	const glm::vec2 resizeDelta = consumeRawMouseDragDelta(
@@ -845,8 +869,14 @@ void updatePaintBrushSize(const platform::Input &input)
 	playerPaintBrushRadius = static_cast<int>(std::round(playerPaintBrushRadiusPrecise));
 }
 
-void pickPaintColorFromScreen(platform::Input &input)
+void pickPaintColorFromScreen(ClientGameplay &gameplay, platform::Input &input)
 {
+	auto &paintModeActive = gameplay.paintModeActive;
+	auto &cameraMode = gameplay.cameraMode;
+	auto &paintColorPickModeActive = gameplay.paintColorPickModeActive;
+	auto &paintColorUiCapturingMouse = gameplay.paintColorUiCapturingMouse;
+	auto &playerPaintColorHsv = gameplay.playerPaintColorHsv;
+
 	if (!paintModeActive || cameraMode != CameraMode::ThirdPerson)
 	{
 		paintColorPickModeActive = false;
@@ -864,39 +894,48 @@ void pickPaintColorFromScreen(platform::Input &input)
 	}
 
 	glm::vec3 sampledColor = {};
-	if (sampleVisibleScreenColor(getMouseFramebufferPosition(input), sampledColor))
+	if (sampleVisibleScreenColor(getMouseFramebufferPosition(gameplay, input), sampledColor))
 	{
 		playerPaintColorHsv = rgbToHsv(sampledColor);
 	}
 
 	paintColorPickModeActive = false;
-	resetPaintStrokeState();
+	resetPaintStrokeState(gameplay);
 }
 
-void paintPlayerFromCursor(platform::Input &input)
+void paintPlayerFromCursor(ClientGameplay &gameplay, platform::Input &input)
 {
+	auto &paintDebugState = gameplay.paintDebugState;
+	auto &paintModeActive = gameplay.paintModeActive;
+	auto &cameraMode = gameplay.cameraMode;
+	auto &paintColorUiCapturingMouse = gameplay.paintColorUiCapturingMouse;
+	auto &paintColorPickModeActive = gameplay.paintColorPickModeActive;
+	auto &renderer3D = gameplay.renderer3D;
+	auto &hasLastPaintStrokeScreenPosition = gameplay.hasLastPaintStrokeScreenPosition;
+	auto &lastPaintStrokeScreenPosition = gameplay.lastPaintStrokeScreenPosition;
+
 	paintDebugState.hoverValid = false;
 	paintDebugState.clickValid = false;
 
 	if (!paintModeActive || cameraMode != CameraMode::ThirdPerson)
 	{
-		resetPaintStrokeState();
+		resetPaintStrokeState(gameplay);
 		return;
 	}
 
 	if (paintColorUiCapturingMouse)
 	{
-		resetPaintStrokeState();
+		resetPaintStrokeState(gameplay);
 		return;
 	}
 
 	if (paintColorPickModeActive)
 	{
-		resetPaintStrokeState();
+		resetPaintStrokeState(gameplay);
 		return;
 	}
 
-	const glm::ivec2 currentScreenPosition = getMouseFramebufferPosition(input);
+	const glm::ivec2 currentScreenPosition = getMouseFramebufferPosition(gameplay, input);
 	gl3d::PaintTargetSample hoverSample = {};
 	if (!renderer3D.sampleEntityPaintTarget(currentScreenPosition, hoverSample))
 	{
@@ -910,13 +949,13 @@ void paintPlayerFromCursor(platform::Input &input)
 
 	if (paintDebugState.brushResizeActive)
 	{
-		resetPaintStrokeState();
+		resetPaintStrokeState(gameplay);
 		return;
 	}
 
 	if (!input.isLMouseHeld())
 	{
-		resetPaintStrokeState();
+		resetPaintStrokeState(gameplay);
 		return;
 	}
 
@@ -926,6 +965,7 @@ void paintPlayerFromCursor(platform::Input &input)
 
 	gl3d::PaintTargetSample lastSuccessfulSample = {};
 	paintDebugState.clickValid = paintInterpolatedStrokeScreenSpace(
+		gameplay,
 		strokeStartPosition,
 		currentScreenPosition,
 		lastSuccessfulSample);
@@ -938,8 +978,14 @@ void paintPlayerFromCursor(platform::Input &input)
 	lastPaintStrokeScreenPosition = currentScreenPosition;
 }
 
-void renderPaintColorPicker()
+void renderPaintColorPicker(ClientGameplay &gameplay, gl2d::Renderer2D &renderer, gl2d::Font &paintUiFont)
 {
+	auto &paintModeActive = gameplay.paintModeActive;
+	auto &cameraMode = gameplay.cameraMode;
+	auto &playerPaintColorHsv = gameplay.playerPaintColorHsv;
+	auto &paintDebugState = gameplay.paintDebugState;
+	auto &paintColorPickModeActive = gameplay.paintColorPickModeActive;
+
 	if (!paintModeActive || cameraMode != CameraMode::ThirdPerson)
 	{
 		return;
@@ -969,12 +1015,12 @@ void renderPaintColorPicker()
 
 			renderer.renderRectangle(
 				{sliderRect.x + segmentWidth * segment, sliderRect.y, segmentWidth + 1.0f, sliderRect.w},
-				toColor4f(getPaintColorSliderPreview(slider, mid), 1.0f));
+				toColor4f(getPaintColorSliderPreview(gameplay, slider, mid), 1.0f));
 		}
 
 		renderer.renderRectangleOutline(sliderRect, {0.0f, 0.0f, 0.0f, 0.95f}, 2.0f);
 
-		const float *sliderValue = getPaintColorSliderValue(slider);
+		const float *sliderValue = getPaintColorSliderValue(gameplay, slider);
 		if (sliderValue != nullptr)
 		{
 			const float handleCenterX = sliderRect.x + std::clamp(*sliderValue, 0.0f, 1.0f) * sliderRect.z;
@@ -1011,7 +1057,7 @@ void renderPaintColorPicker()
 		paintColorPickModeActive ? Colors_White : gl2d::Color4f{0.0f, 0.0f, 0.0f, 0.95f},
 		2.0f);
 
-	if (paintUiFontLoaded)
+	if (paintUiFont.texture.id != 0)
 	{
 		renderer.renderText({panel.x + 18.0f, panel.y + 22.0f}, "PAINT", paintUiFont, Colors_White, 22.0f, 2.0f, 2.0f, false);
 		renderer.renderText({panel.x + 18.0f, getPaintColorSliderRect(PaintColorSlider::Hue).y + 15.0f}, "H", paintUiFont, Colors_White, 18.0f, 2.0f, 2.0f, false);
@@ -1029,14 +1075,21 @@ void renderPaintColorPicker()
 	}
 }
 
-void renderPaintBrushOverlay(const platform::Input &input)
+void renderPaintBrushOverlay(ClientGameplay &gameplay, const platform::Input &input, gl2d::Renderer2D &renderer)
 {
+	auto &paintModeActive = gameplay.paintModeActive;
+	auto &cameraMode = gameplay.cameraMode;
+	auto &playerPaintColorHsv = gameplay.playerPaintColorHsv;
+	auto &paintColorPickModeActive = gameplay.paintColorPickModeActive;
+	auto &playerPaintBrushRadius = gameplay.playerPaintBrushRadius;
+	auto &paintDebugState = gameplay.paintDebugState;
+
 	if (!paintModeActive || cameraMode != CameraMode::ThirdPerson)
 	{
 		return;
 	}
 
-	const glm::vec2 mousePosition = glm::vec2(getMouseFramebufferPosition(input));
+	const glm::vec2 mousePosition = glm::vec2(getMouseFramebufferPosition(gameplay, input));
 	const glm::vec3 currentPaintColor = hsvToRgb(playerPaintColorHsv);
 
 	if (paintColorPickModeActive)
@@ -1069,8 +1122,10 @@ void renderPaintBrushOverlay(const platform::Input &input)
 	renderer.renderCircleOutline(mousePosition, previewRadius, brushColor, 2.0f, 40);
 }
 
-void updateThirdPersonCameraZoom(bool ignoreImguiCapture = false)
+void updateThirdPersonCameraZoom(ClientGameplay &gameplay, bool ignoreImguiCapture = false)
 {
+	auto &thirdPersonCameraDistance = gameplay.thirdPersonCameraDistance;
+
 	ImGuiIO &io = ImGui::GetIO();
 	if ((!ignoreImguiCapture && io.WantCaptureMouse) || std::abs(io.MouseWheel) < 0.001f)
 	{
@@ -1083,8 +1138,14 @@ void updateThirdPersonCameraZoom(bool ignoreImguiCapture = false)
 		THIRD_PERSON_CAMERA_DISTANCE_MAX);
 }
 
-void updateThirdPersonCamera()
+void updateThirdPersonCamera(ClientGameplay &gameplay)
 {
+	auto &playerPhysics = gameplay.playerPhysics;
+	auto &thirdPersonYaw = gameplay.thirdPersonYaw;
+	auto &thirdPersonPitch = gameplay.thirdPersonPitch;
+	auto &thirdPersonCameraDistance = gameplay.thirdPersonCameraDistance;
+	auto &renderer3D = gameplay.renderer3D;
+
 	const glm::vec3 playerPosition = playerPhysics.getPlayerPosition();
 	const glm::vec3 cameraForward = buildThirdPersonForward(thirdPersonYaw, thirdPersonPitch);
 	const glm::vec3 target = playerPosition + glm::vec3(0.0f, THIRD_PERSON_CAMERA_TARGET_HEIGHT, 0.0f);
@@ -1093,12 +1154,27 @@ void updateThirdPersonCamera()
 	renderer3D.camera.position = target - cameraForward * thirdPersonCameraDistance;
 }
 
-bool initGameplay()
+bool ClientGameplay::init()
 {
+	cameraMode = CameraMode::Free;
+	thirdPersonYaw = 0.0f;
+	thirdPersonPitch = glm::radians(-18.0f);
+	thirdPersonCameraDistance = THIRD_PERSON_CAMERA_DISTANCE_DEFAULT;
+	paintModeActive = false;
+	playerPaintTextures.clear();
+	playerPaintBrushRadius = PLAYER_PAINT_BRUSH_RADIUS_DEFAULT;
+	playerPaintBrushRadiusPrecise = static_cast<float>(PLAYER_PAINT_BRUSH_RADIUS_DEFAULT);
+	playerPaintColorHsv = {0.0f, 1.0f, 0.0f};
+	paintColorPickModeActive = false;
+	paintColorUiHovered = false;
+	paintColorUiCapturingMouse = false;
+	activePaintColorSlider = PaintColorSlider::None;
+	paintDebugState = {};
+	hasLastPaintStrokeScreenPosition = false;
+	lastPaintStrokeScreenPosition = {};
+
 #pragma region init stuff
 	platform::showMouse(false);
-	paintUiFont.createFromFile(RESOURCES_PATH "Arial.ttf");
-	paintUiFontLoaded = paintUiFont.texture.id != 0;
 
 	renderer3D.init(1, 1, RESOURCES_PATH "BRDFintegrationMap.png");
 
@@ -1108,14 +1184,14 @@ bool initGameplay()
 
 	playerEntity = renderer3D.createEntity(playerModel, {}, false, true, false);
 	renderer3D.setEntityAnimate(playerEntity, true);
-	setupPlayerPaintTextures();
+	setupPlayerPaintTextures(*this);
 
 	if (!playerPhysics.init())
 	{
 		return false;
 	}
 
-	syncPlayerEntityToPhysics();
+	syncPlayerEntityToPhysics(*this);
 
 #pragma region map
 
@@ -1152,25 +1228,25 @@ bool initGameplay()
 	renderer3D.camera.position = {0.0f, 2.2f, 6.0f};
 	renderer3D.camera.viewDirection = glm::normalize(
 		glm::vec3(0.0f, THIRD_PERSON_CAMERA_TARGET_HEIGHT, 0.0f) - renderer3D.camera.position);
-	syncThirdPersonOrbitToCamera();
+	syncThirdPersonOrbitToCamera(*this);
 #pragma endregion
 
 	return true;
 }
 
-bool updateGameplay(float deltaTime, platform::Input &input)
+bool ClientGameplay::update(float deltaTime, platform::Input &input, gl2d::Renderer2D &renderer, gl2d::Font &paintUiFont)
 {
+
 #pragma region init stuff
 	const int w = platform::getFrameBufferSizeX();
 	const int h = platform::getFrameBufferSizeY();
-	(void)input;
 #pragma endregion
 
 	renderer3D.updateWindowMetrics(w, h);
 
 	if (platform::isButtonPressed(platform::Button::Tab))
 	{
-		toggleCameraMode();
+		toggleCameraMode(*this);
 	}
 
 	if (cameraMode == CameraMode::ThirdPerson && platform::isButtonPressed(platform::Button::F))
@@ -1182,8 +1258,8 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 		}
 	}
 
-	updatePaintColorPicker(input);
-	updatePaintBrushSize(input);
+	updatePaintColorPicker(*this, input);
+	updatePaintBrushSize(*this, input);
 
 	const bool captureMouseLook = cameraMode == CameraMode::Free || !paintModeActive;
 	static glm::vec2 lastMousePosition = {};
@@ -1207,7 +1283,7 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 				thirdPersonPitch + paintOrbitDelta.y,
 				THIRD_PERSON_PITCH_MIN,
 				THIRD_PERSON_PITCH_MAX);
-			updateThirdPersonCameraZoom(true);
+			updateThirdPersonCameraZoom(*this, true);
 		}
 		else
 		{
@@ -1216,24 +1292,24 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 				thirdPersonPitch + lookDelta.y,
 				THIRD_PERSON_PITCH_MIN,
 				THIRD_PERSON_PITCH_MAX);
-			updateThirdPersonCameraZoom();
-			playerInput = buildPlayerInput();
+			updateThirdPersonCameraZoom(*this);
+			playerInput = buildPlayerInput(*this);
 		}
 	}
 
 	playerPhysics.update(deltaTime, playerInput);
-	syncPlayerEntityToPhysics();
+	syncPlayerEntityToPhysics(*this);
 
 	if (cameraMode == CameraMode::ThirdPerson)
 	{
-		updateThirdPersonCamera();
+		updateThirdPersonCamera(*this);
 	}
 
 	renderer3D.render(deltaTime);
-	pickPaintColorFromScreen(input);
-	paintPlayerFromCursor(input);
-	renderPaintBrushOverlay(input);
-	renderPaintColorPicker();
+	pickPaintColorFromScreen(*this, input);
+	paintPlayerFromCursor(*this, input);
+	renderPaintBrushOverlay(*this, input, renderer);
+	renderPaintColorPicker(*this, renderer, paintUiFont);
 
 	{
 		ImGuiViewport *mainVp = ImGui::GetMainViewport();
@@ -1258,7 +1334,7 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 		ImGui::Text("Camera: %s", cameraMode == CameraMode::Free ? "Free" : "Third-Person");
 		if (ImGui::Button(cameraMode == CameraMode::Free ? "Switch to Third-Person (Tab)" : "Switch to Free Camera (Tab)"))
 		{
-			toggleCameraMode();
+			toggleCameraMode(*this);
 		}
 		ImGui::Text("Free camera: WASD + Q/E");
 		ImGui::Text("Player: WASD move, Shift run / wall descend, Space jump / wall climb");
@@ -1305,76 +1381,8 @@ bool updateGameplay(float deltaTime, platform::Input &input)
 	return true;
 }
 
-void shutdownGameplay()
-{
-	if (paintUiFontLoaded)
-	{
-		paintUiFont.cleanup();
-		paintUiFontLoaded = false;
-	}
-	playerPhysics.shutdown();
-}
-
-bool ClientGameplay::init(gl2d::Renderer2D &inRenderer)
-{
-	gClientGameplay = this;
-	renderer2D = &inRenderer;
-	cameraMode = CameraMode::Free;
-	thirdPersonYaw = 0.0f;
-	thirdPersonPitch = glm::radians(-18.0f);
-	thirdPersonCameraDistance = THIRD_PERSON_CAMERA_DISTANCE_DEFAULT;
-	paintModeActive = false;
-	playerPaintTextures.clear();
-	playerPaintBrushRadius = PLAYER_PAINT_BRUSH_RADIUS_DEFAULT;
-	playerPaintBrushRadiusPrecise = static_cast<float>(PLAYER_PAINT_BRUSH_RADIUS_DEFAULT);
-	playerPaintColorHsv = {0.0f, 1.0f, 0.0f};
-	paintColorPickModeActive = false;
-	paintColorUiHovered = false;
-	paintColorUiCapturingMouse = false;
-	paintUiFontLoaded = false;
-	activePaintColorSlider = PaintColorSlider::None;
-	paintDebugState = {};
-	hasLastPaintStrokeScreenPosition = false;
-	lastPaintStrokeScreenPosition = {};
-	return initGameplay();
-}
-
-bool ClientGameplay::update(float deltaTime, platform::Input &input, gl2d::Renderer2D &inRenderer)
-{
-	gClientGameplay = this;
-	renderer2D = &inRenderer;
-	return updateGameplay(deltaTime, input);
-}
-
 void ClientGameplay::shutdown()
 {
-	gClientGameplay = this;
-	shutdownGameplay();
-	renderer2D = nullptr;
-}
 
-#undef renderer
-#undef paintUiFont
-#undef renderer3D
-#undef playerModel
-#undef mapModel
-#undef playerEntity
-#undef mapEntity
-#undef playerPhysics
-#undef cameraMode
-#undef thirdPersonYaw
-#undef thirdPersonPitch
-#undef thirdPersonCameraDistance
-#undef paintModeActive
-#undef playerPaintTextures
-#undef playerPaintBrushRadius
-#undef playerPaintBrushRadiusPrecise
-#undef playerPaintColorHsv
-#undef paintColorPickModeActive
-#undef paintColorUiHovered
-#undef paintColorUiCapturingMouse
-#undef paintUiFontLoaded
-#undef activePaintColorSlider
-#undef paintDebugState
-#undef hasLastPaintStrokeScreenPosition
-#undef lastPaintStrokeScreenPosition
+	playerPhysics.shutdown();
+}

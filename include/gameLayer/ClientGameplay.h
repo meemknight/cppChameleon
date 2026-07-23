@@ -47,12 +47,10 @@ struct ClientGameplay
 		glm::ivec2 framebufferMousePosition = {};
 	};
 
-	bool init(gl2d::Renderer2D &renderer);
-	bool update(float deltaTime, platform::Input &input, gl2d::Renderer2D &renderer);
+	bool init();
+	bool update(float deltaTime, platform::Input &input, gl2d::Renderer2D &renderer, gl2d::Font &paintUiFont);
 	void shutdown();
 
-	gl2d::Renderer2D *renderer2D = nullptr;
-	gl2d::Font paintUiFont;
 	gl3d::Renderer3D renderer3D;
 	gl3d::Model playerModel;
 	gl3d::Model mapModel;
@@ -72,7 +70,6 @@ struct ClientGameplay
 	bool paintColorPickModeActive = false;
 	bool paintColorUiHovered = false;
 	bool paintColorUiCapturingMouse = false;
-	bool paintUiFontLoaded = false;
 	PaintColorSlider activePaintColorSlider = PaintColorSlider::None;
 	PaintDebugState paintDebugState;
 	bool hasLastPaintStrokeScreenPosition = false;

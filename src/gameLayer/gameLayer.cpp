@@ -61,7 +61,7 @@ bool gameLogic(float deltaTime, platform::Input &input)
 		if (rendererUI.Button("Start game", Colors_White, uiTexture))
 		{
 			currentGameState = inGame;
-			clientGameplay.init(renderer);
+			clientGameplay.init();
 		}
 
 
@@ -75,7 +75,7 @@ bool gameLogic(float deltaTime, platform::Input &input)
 	}
 	else if (currentGameState == inGame)
 	{
-		result = clientGameplay.update(deltaTime, input, renderer);
+		result = clientGameplay.update(deltaTime, input, renderer, font);
 	}
 
 
