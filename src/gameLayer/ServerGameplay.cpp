@@ -1,14 +1,24 @@
 #include <ServerGameplay.h>
 #include <iostream>
 
-
-void ServerGameplay::init()
+namespace
 {
+	std::uint64_t getPeerCid(ENetPeer *peer)
+	{
+		return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(peer->data));
+	}
+}
+
+bool ServerGameplay::init()
+{
+	close();
+	playerIDs = 1;
+	connectedClients = 0;
 
 	//start enet server
 	ENetAddress adress;
 	adress.host = ENET_HOST_ANY;
-	adress.port = 7771;
+	adress.port = 7769;
 	ENetEvent event;
 
 	//first param adress, players limit, channels, bandwith limit
@@ -17,14 +27,19 @@ void ServerGameplay::init()
 
 	if (!server)
 	{
-		//we can't open the server
-		exit(0);
+		return false;
 	}
+
+	return true;
 
 }
 
 void ServerGameplay::update()
 {
+	if (!server)
+	{
+		return;
+	}
 
 #pragma region host service
 
@@ -82,8 +97,13 @@ void ServerGameplay::update()
 
 void ServerGameplay::close()
 {
+	if (server)
+	{
+		enet_host_destroy(server);
+		server = nullptr;
+	}
 
-	//todo notify clients we closed
+	connectedClients = 0;
 
 }
 
@@ -95,12 +115,14 @@ std::uint64_t ServerGameplay::getIdAndIncrement()
 
 void ServerGameplay::addConnection(ENetEvent &event)
 {
+	connectedClients++;
 
 	event.peer->timeoutMinimum = 10'000;
 	event.peer->timeoutMaximum = 30'000;
 	event.peer->timeoutLimit = 64;
 
 	std::uint64_t id = getIdAndIncrement();
+	event.peer->data = reinterpret_cast<void *>(static_cast<std::uintptr_t>(id));
 
 	//send player data
 	Packet p;
@@ -113,6 +135,7 @@ void ServerGameplay::addConnection(ENetEvent &event)
 	//send own cid
 	sendPacket(event.peer, p, (const char *)&packetToSend,
 		sizeof(packetToSend), true, CHANNEL_CONNECTIONS);
+	enet_host_flush(server);
 
 
 	//todo send to others the fact that now we have a new connection
@@ -122,10 +145,93 @@ void ServerGameplay::addConnection(ENetEvent &event)
 
 void ServerGameplay::recieveDataFromClients(ENetEvent &event)
 {
+	Packet packet = {};
+	size_t payloadSize = 0;
+	char *payload = parsePacket(event, packet, payloadSize);
+	if (!payload)
+	{
+		return;
+	}
+
+	const std::uint32_t header = packet.header & 0x7FFF'FFFFu;
+	const std::uint64_t cid = getPeerCid(event.peer);
+	const bool reliable = (event.packet->flags & ENET_PACKET_FLAG_RELIABLE) != 0;
+
+	switch (header)
+	{
+	case headerPlayerStateUpdate:
+	{
+		if (payloadSize >= sizeof(Packet_PlayerStateUpdate) && cid != 0)
+		{
+			packet.header = headerPlayerStateUpdate;
+			packet.cid = cid;
+			broadcastPacketToOtherClients(event.peer, packet, payload, sizeof(Packet_PlayerStateUpdate), reliable, CHANNEL_GAMEPLAY);
+		}
+		break;
+	}
+
+	case headerPlayerPaintTextureUpdate:
+	{
+		if (payloadSize >= sizeof(Packet_PlayerPaintTextureUpdate) && cid != 0)
+		{
+			packet.cid = cid;
+			broadcastPacketToOtherClients(event.peer, packet, payload, payloadSize, true, CHANNEL_PAINTING);
+		}
+		break;
+	}
+
+	default:
+		break;
+	}
 
 }
 
 void ServerGameplay::removeConnection(ENetEvent &event)
 {
+	const std::uint64_t cid = getPeerCid(event.peer);
+	event.peer->data = nullptr;
 
+	if (connectedClients > 0)
+	{
+		connectedClients--;
+	}
+
+	if (cid != 0)
+	{
+		Packet packet = {};
+		packet.header = headerClientDisconnected;
+		packet.cid = cid;
+
+		Packet_ClientDisconnected disconnectedPacket = {};
+		disconnectedPacket.cid = cid;
+
+		broadcastPacketToOtherClients(
+			event.peer,
+			packet,
+			(const char *)&disconnectedPacket,
+			sizeof(disconnectedPacket),
+			true,
+			CHANNEL_CONNECTIONS);
+	}
+
+}
+
+void ServerGameplay::broadcastPacketToOtherClients(ENetPeer *sourcePeer, Packet packet,
+	const char *data, size_t size, bool reliable, int channel)
+{
+	if (!server)
+	{
+		return;
+	}
+
+	for (size_t i = 0; i < server->peerCount; ++i)
+	{
+		ENetPeer &peer = server->peers[i];
+		if (&peer == sourcePeer || peer.state != ENET_PEER_STATE_CONNECTED)
+		{
+			continue;
+		}
+
+		sendPacket(&peer, packet, data, size, reliable, channel);
+	}
 }

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <sstream>
 
 #include "imfilebrowser.h"
@@ -46,11 +47,19 @@ namespace
 	constexpr float PAINT_COLOR_SLIDER_WIDTH = 170.0f;
 	constexpr float PAINT_COLOR_SLIDER_HEIGHT = 18.0f;
 	constexpr float PAINT_COLOR_SLIDER_SEGMENTS = 40.0f;
+	constexpr float PLAYER_STATE_SEND_INTERVAL_UNRELIABLE = 1.0f / 20.0f;
+	constexpr float PLAYER_STATE_SEND_INTERVAL_RELIABLE = 1.0f;
+	constexpr float PLAYER_PAINT_TEXTURE_SEND_INTERVAL = 0.5f;
+	constexpr float PLAYER_STATE_POSITION_EPSILON = 0.02f;
+	constexpr float PLAYER_STATE_YAW_EPSILON = 0.02f;
+	constexpr float REMOTE_PLAYER_INTERPOLATION_SPEED = 22.0f;
+	constexpr float REMOTE_PLAYER_SNAP_DISTANCE = 4.0f;
 
 	using PlayerPaintTexture = ClientGameplay::PlayerPaintTexture;
 	using CameraMode = ClientGameplay::CameraMode;
 	using PaintColorSlider = ClientGameplay::PaintColorSlider;
 	using PaintDebugState = ClientGameplay::PaintDebugState;
+	using RemotePlayerVisual = ClientGameplay::RemotePlayerVisual;
 }
 
 #define USE_GPU 1
@@ -62,6 +71,11 @@ extern "C"
 	__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = USE_GPU;
 }
 #pragma endregion
+
+bool copyTextureToCpu(ClientGameplay &gameplay, gl3d::Texture texture,
+	std::vector<unsigned char> &pixels, glm::ivec2 &size, int &quality);
+gl3d::Texture createPaintTexture(ClientGameplay &gameplay, const PlayerPaintTexture &paintTexture);
+void uploadPlayerPaintTexture(ClientGameplay &gameplay, PlayerPaintTexture &paintTexture);
 
 glm::vec2 consumeLookDelta(glm::vec2 &lastMousePos, bool captureMouse)
 {
@@ -339,6 +353,49 @@ PhysicsControllerInput buildPlayerInput(ClientGameplay &gameplay)
 	return result;
 }
 
+int wrapAnimationIndex(int animationIndex)
+{
+	if (animationIndex < 0)
+	{
+		animationIndex = PLAYER_ANIMATIONS - 1;
+	}
+
+	return animationIndex % PLAYER_ANIMATIONS;
+}
+
+void updateLocalAnimationSelection(ClientGameplay &gameplay)
+{
+	auto &cameraMode = gameplay.cameraMode;
+	auto &paintModeActive = gameplay.paintModeActive;
+	auto &localAnimationIndex = gameplay.localAnimationIndex;
+
+	if (cameraMode != CameraMode::ThirdPerson || paintModeActive)
+	{
+		return;
+	}
+
+	if (platform::isButtonPressed(platform::Button::Q))
+	{
+		localAnimationIndex = wrapAnimationIndex(localAnimationIndex - 1);
+	}
+
+	if (platform::isButtonPressed(platform::Button::E))
+	{
+		localAnimationIndex = wrapAnimationIndex(localAnimationIndex + 1);
+	}
+}
+
+int getCurrentLocalAnimationIndex(ClientGameplay &gameplay, const PhysicsControllerInput &playerInput)
+{
+	const bool hasMovementInput = glm::dot(playerInput.moveDirection, playerInput.moveDirection) > 0.0001f;
+	if (playerInput.wantsToRun && hasMovementInput)
+	{
+		return 9;
+	}
+
+	return gameplay.localAnimationIndex;
+}
+
 void syncPlayerEntityToPhysics(ClientGameplay &gameplay)
 {
 	auto &renderer3D = gameplay.renderer3D;
@@ -350,6 +407,370 @@ void syncPlayerEntityToPhysics(ClientGameplay &gameplay)
 	playerTransform.rotation = {};
 	playerTransform.rotation.y = playerPhysics.getPlayerYaw() + PLAYER_MODEL_YAW_OFFSET;
 	renderer3D.setEntityTransform(playerEntity, playerTransform);
+}
+
+Packet_PlayerStateUpdate buildLocalPlayerState(ClientGameplay &gameplay, int animationIndex)
+{
+	Packet_PlayerStateUpdate playerState = {};
+	playerState.position = gameplay.playerPhysics.getPlayerPosition();
+	playerState.yaw = gameplay.playerPhysics.getPlayerYaw();
+	playerState.animationIndex = animationIndex;
+	return playerState;
+}
+
+bool didPlayerStateChange(const Packet_PlayerStateUpdate &currentState,
+	const Packet_PlayerStateUpdate &previousState)
+{
+	const glm::vec3 positionDelta = currentState.position - previousState.position;
+	if (glm::dot(positionDelta, positionDelta) > PLAYER_STATE_POSITION_EPSILON * PLAYER_STATE_POSITION_EPSILON)
+	{
+		return true;
+	}
+
+	if (std::abs(currentState.yaw - previousState.yaw) > PLAYER_STATE_YAW_EPSILON)
+	{
+		return true;
+	}
+
+	return currentState.animationIndex != previousState.animationIndex;
+}
+
+float normalizeAngle(float angle)
+{
+	const float twoPi = glm::two_pi<float>();
+
+	while (angle > glm::pi<float>())
+	{
+		angle -= twoPi;
+	}
+
+	while (angle < -glm::pi<float>())
+	{
+		angle += twoPi;
+	}
+
+	return angle;
+}
+
+float interpolateAngle(float currentAngle, float targetAngle, float alpha)
+{
+	const float delta = normalizeAngle(targetAngle - currentAngle);
+	return normalizeAngle(currentAngle + delta * alpha);
+}
+
+void clearPaintTextures(ClientGameplay &gameplay, std::vector<PlayerPaintTexture> &paintTextures)
+{
+	auto &renderer3D = gameplay.renderer3D;
+
+	for (auto &paintTexture : paintTextures)
+	{
+		if (renderer3D.isTexture(paintTexture.texture))
+		{
+			renderer3D.deleteTexture(paintTexture.texture);
+		}
+	}
+
+	paintTextures.clear();
+}
+
+PlayerPaintTexture *getPaintTexture(std::vector<PlayerPaintTexture> &paintTextures, int meshIndex)
+{
+	for (auto &paintTexture : paintTextures)
+	{
+		if (paintTexture.meshIndex == meshIndex)
+		{
+			return &paintTexture;
+		}
+	}
+
+	return nullptr;
+}
+
+void setupEntityPaintTextures(ClientGameplay &gameplay, gl3d::Entity &entity,
+	std::vector<PlayerPaintTexture> &paintTextures, bool setAsPaintTarget)
+{
+	auto &renderer3D = gameplay.renderer3D;
+
+	clearPaintTextures(gameplay, paintTextures);
+
+	const int meshCount = renderer3D.getEntityMeshesCount(entity);
+	for (int meshIndex = 0; meshIndex < meshCount; ++meshIndex)
+	{
+		gl3d::TextureDataForMaterial materialTextures = renderer3D.getEntityMeshMaterialTextures(entity, meshIndex);
+		if (!renderer3D.isTexture(materialTextures.albedoTexture))
+		{
+			continue;
+		}
+
+		PlayerPaintTexture paintTexture = {};
+		paintTexture.meshIndex = meshIndex;
+		if (!copyTextureToCpu(gameplay, materialTextures.albedoTexture, paintTexture.pixels, paintTexture.size, paintTexture.quality))
+		{
+			continue;
+		}
+
+		paintTexture.texture = createPaintTexture(gameplay, paintTexture);
+		materialTextures.albedoTexture = paintTexture.texture;
+		renderer3D.setEntityMeshMaterialTextures(entity, meshIndex, materialTextures);
+		paintTextures.push_back(std::move(paintTexture));
+	}
+
+	if (setAsPaintTarget)
+	{
+		renderer3D.setEntityPaintTarget(entity);
+	}
+}
+
+void clearRemotePlayers(ClientGameplay &gameplay)
+{
+	auto &renderer3D = gameplay.renderer3D;
+	auto &remotePlayers = gameplay.remotePlayers;
+
+	for (auto &[cid, remotePlayer] : remotePlayers)
+	{
+		(void)cid;
+		clearPaintTextures(gameplay, remotePlayer.paintTextures);
+		if (renderer3D.isEntity(remotePlayer.entity))
+		{
+			renderer3D.deleteEntity(remotePlayer.entity);
+		}
+	}
+
+	remotePlayers.clear();
+}
+
+void applyRemotePaintTextureUpdate(ClientGameplay &gameplay, gl3d::Entity &entity,
+	std::vector<PlayerPaintTexture> &paintTextures,
+	const ClientNetworking::RemotePaintTextureUpdate &update)
+{
+	auto &renderer3D = gameplay.renderer3D;
+
+	PlayerPaintTexture *paintTexture = getPaintTexture(paintTextures, update.meshIndex);
+	if (paintTexture == nullptr)
+	{
+		return;
+	}
+
+	const bool needsRecreateTexture =
+		paintTexture->size != update.size
+		|| paintTexture->quality != update.quality
+		|| paintTexture->pixels.size() != update.pixels.size()
+		|| !renderer3D.isTexture(paintTexture->texture);
+
+	paintTexture->size = update.size;
+	paintTexture->quality = update.quality;
+	paintTexture->pixels = update.pixels;
+
+	if (needsRecreateTexture)
+	{
+		if (renderer3D.isTexture(paintTexture->texture))
+		{
+			renderer3D.deleteTexture(paintTexture->texture);
+		}
+
+		paintTexture->texture = createPaintTexture(gameplay, *paintTexture);
+		gl3d::TextureDataForMaterial materialTextures = renderer3D.getEntityMeshMaterialTextures(entity, update.meshIndex);
+		materialTextures.albedoTexture = paintTexture->texture;
+		renderer3D.setEntityMeshMaterialTextures(entity, update.meshIndex, materialTextures);
+	}
+	else
+	{
+		uploadPlayerPaintTexture(gameplay, *paintTexture);
+	}
+}
+
+void applyPendingRemotePaintUpdates(ClientGameplay &gameplay, std::uint64_t cid, RemotePlayerVisual &remotePlayer)
+{
+	auto &clientNetworking = gameplay.clientNetworking;
+
+	auto pendingUpdates = clientNetworking.remotePaintUpdates.find(cid);
+	if (pendingUpdates == clientNetworking.remotePaintUpdates.end())
+	{
+		return;
+	}
+
+	for (auto &[meshIndex, update] : pendingUpdates->second)
+	{
+		(void)meshIndex;
+		applyRemotePaintTextureUpdate(gameplay, remotePlayer.entity, remotePlayer.paintTextures, update);
+	}
+
+	clientNetworking.remotePaintUpdates.erase(pendingUpdates);
+}
+
+void syncRemotePlayers(ClientGameplay &gameplay, float deltaTime)
+{
+	auto &clientNetworking = gameplay.clientNetworking;
+	auto &playerModel = gameplay.playerModel;
+	auto &remotePlayers = gameplay.remotePlayers;
+	auto &renderer3D = gameplay.renderer3D;
+	const float interpolationAlpha = 1.0f - std::exp(-REMOTE_PLAYER_INTERPOLATION_SPEED * deltaTime);
+
+	for (auto it = remotePlayers.begin(); it != remotePlayers.end();)
+	{
+		if (clientNetworking.remotePlayers.find(it->first) == clientNetworking.remotePlayers.end())
+		{
+			clearPaintTextures(gameplay, it->second.paintTextures);
+			if (renderer3D.isEntity(it->second.entity))
+			{
+				renderer3D.deleteEntity(it->second.entity);
+			}
+			it = remotePlayers.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+
+	for (auto &[cid, remoteState] : clientNetworking.remotePlayers)
+	{
+		auto &remotePlayer = remotePlayers[cid];
+		if (!renderer3D.isEntity(remotePlayer.entity))
+		{
+			remotePlayer.entity = renderer3D.createEntity(playerModel, {}, false, true, false);
+			renderer3D.setEntityAnimate(remotePlayer.entity, true);
+			setupEntityPaintTextures(gameplay, remotePlayer.entity, remotePlayer.paintTextures, false);
+		}
+
+		if (!remotePlayer.hasVisualState)
+		{
+			remotePlayer.visualPosition = remoteState.position;
+			remotePlayer.visualYaw = remoteState.yaw;
+			remotePlayer.hasVisualState = true;
+		}
+		else
+		{
+			const glm::vec3 positionDelta = remoteState.position - remotePlayer.visualPosition;
+			const float distanceToTarget = glm::length(positionDelta);
+
+			if (distanceToTarget > REMOTE_PLAYER_SNAP_DISTANCE)
+			{
+				remotePlayer.visualPosition = remoteState.position;
+				remotePlayer.visualYaw = remoteState.yaw;
+			}
+			else
+			{
+				remotePlayer.visualPosition = glm::mix(
+					remotePlayer.visualPosition,
+					remoteState.position,
+					interpolationAlpha);
+				remotePlayer.visualYaw = interpolateAngle(
+					remotePlayer.visualYaw,
+					remoteState.yaw,
+					interpolationAlpha);
+			}
+		}
+
+		gl3d::Transform transform = renderer3D.getEntityTransform(remotePlayer.entity);
+		transform.position = remotePlayer.visualPosition;
+		transform.rotation = {};
+		transform.rotation.y = remotePlayer.visualYaw + PLAYER_MODEL_YAW_OFFSET;
+		renderer3D.setEntityTransform(remotePlayer.entity, transform);
+		renderer3D.setEntityAnimationIndex(remotePlayer.entity, remoteState.animationIndex);
+		applyPendingRemotePaintUpdates(gameplay, cid, remotePlayer);
+	}
+}
+
+void sendLocalPlayerState(ClientGameplay &gameplay, float deltaTime, int animationIndex)
+{
+	auto &clientNetworking = gameplay.clientNetworking;
+	auto &hasLastSentPlayerState = gameplay.hasLastSentPlayerState;
+	auto &lastSentPlayerState = gameplay.lastSentPlayerState;
+	auto &timeSinceLastReliablePlayerStateSent = gameplay.timeSinceLastReliablePlayerStateSent;
+	auto &timeSinceLastUnreliablePlayerStateSent = gameplay.timeSinceLastUnreliablePlayerStateSent;
+
+	if (!clientNetworking.receivedPlayerData || clientNetworking.localCID == 0)
+	{
+		return;
+	}
+
+	timeSinceLastReliablePlayerStateSent += deltaTime;
+	timeSinceLastUnreliablePlayerStateSent += deltaTime;
+
+	const Packet_PlayerStateUpdate currentState = buildLocalPlayerState(gameplay, animationIndex);
+	const bool stateChanged = !hasLastSentPlayerState || didPlayerStateChange(currentState, lastSentPlayerState);
+
+	if (timeSinceLastReliablePlayerStateSent >= PLAYER_STATE_SEND_INTERVAL_RELIABLE)
+	{
+		if (clientNetworking.sendPlayerState(currentState, true))
+		{
+			timeSinceLastReliablePlayerStateSent = 0.0f;
+			timeSinceLastUnreliablePlayerStateSent = 0.0f;
+			lastSentPlayerState = currentState;
+			hasLastSentPlayerState = true;
+		}
+		return;
+	}
+
+	if (stateChanged && timeSinceLastUnreliablePlayerStateSent >= PLAYER_STATE_SEND_INTERVAL_UNRELIABLE)
+	{
+		if (clientNetworking.sendPlayerState(currentState, false))
+		{
+			timeSinceLastUnreliablePlayerStateSent = 0.0f;
+			lastSentPlayerState = currentState;
+			hasLastSentPlayerState = true;
+		}
+	}
+}
+
+void sendLocalPaintTextures(ClientGameplay &gameplay, float deltaTime)
+{
+	auto &clientNetworking = gameplay.clientNetworking;
+	auto &localPaintTexturesDirty = gameplay.localPaintTexturesDirty;
+	auto &playerPaintTextures = gameplay.playerPaintTextures;
+	auto &timeSinceLastPaintTextureSync = gameplay.timeSinceLastPaintTextureSync;
+
+	if (!clientNetworking.receivedPlayerData || clientNetworking.localCID == 0)
+	{
+		return;
+	}
+
+	if (!localPaintTexturesDirty)
+	{
+		timeSinceLastPaintTextureSync = 0.0f;
+		return;
+	}
+
+	timeSinceLastPaintTextureSync += deltaTime;
+	if (timeSinceLastPaintTextureSync < PLAYER_PAINT_TEXTURE_SEND_INTERVAL)
+	{
+		return;
+	}
+
+	bool anyTextureStillDirty = false;
+	for (auto &paintTexture : playerPaintTextures)
+	{
+		if (!paintTexture.networkDirty)
+		{
+			continue;
+		}
+
+		if (clientNetworking.sendPaintTextureUpdate(
+			paintTexture.meshIndex,
+			paintTexture.size,
+			paintTexture.quality,
+			paintTexture.pixels))
+		{
+			paintTexture.networkDirty = false;
+		}
+		else
+		{
+			anyTextureStillDirty = true;
+		}
+	}
+
+	for (auto &paintTexture : playerPaintTextures)
+	{
+		if (paintTexture.networkDirty)
+		{
+			anyTextureStillDirty = true;
+			break;
+		}
+	}
+
+	localPaintTexturesDirty = anyTextureStillDirty;
+	timeSinceLastPaintTextureSync = localPaintTexturesDirty ? PLAYER_PAINT_TEXTURE_SEND_INTERVAL : 0.0f;
 }
 
 bool copyTextureToCpu(ClientGameplay &gameplay, gl3d::Texture texture, std::vector<unsigned char> &pixels, glm::ivec2 &size, int &quality)
@@ -426,17 +847,7 @@ gl3d::Texture createPaintTexture(ClientGameplay &gameplay, const PlayerPaintText
 
 PlayerPaintTexture *getPlayerPaintTexture(ClientGameplay &gameplay, int meshIndex)
 {
-	auto &playerPaintTextures = gameplay.playerPaintTextures;
-
-	for (auto &paintTexture : playerPaintTextures)
-	{
-		if (paintTexture.meshIndex == meshIndex)
-		{
-			return &paintTexture;
-		}
-	}
-
-	return nullptr;
+	return getPaintTexture(gameplay.playerPaintTextures, meshIndex);
 }
 
 bool isPaintBrushResizeActive(ClientGameplay &gameplay, const platform::Input &input)
@@ -805,7 +1216,13 @@ bool paintInterpolatedStrokeScreenSpace(ClientGameplay &gameplay,
 
 	for (PlayerPaintTexture *paintTexture : touchedTextures)
 	{
+		paintTexture->networkDirty = true;
 		uploadPlayerPaintTexture(gameplay, *paintTexture);
+	}
+
+	if (paintedAny)
+	{
+		gameplay.localPaintTexturesDirty = true;
 	}
 
 	return paintedAny;
@@ -813,35 +1230,7 @@ bool paintInterpolatedStrokeScreenSpace(ClientGameplay &gameplay,
 
 void setupPlayerPaintTextures(ClientGameplay &gameplay)
 {
-	auto &playerPaintTextures = gameplay.playerPaintTextures;
-	auto &renderer3D = gameplay.renderer3D;
-	auto &playerEntity = gameplay.playerEntity;
-
-	playerPaintTextures.clear();
-
-	const int meshCount = renderer3D.getEntityMeshesCount(playerEntity);
-	for (int meshIndex = 0; meshIndex < meshCount; ++meshIndex)
-	{
-		gl3d::TextureDataForMaterial materialTextures = renderer3D.getEntityMeshMaterialTextures(playerEntity, meshIndex);
-		if (!renderer3D.isTexture(materialTextures.albedoTexture))
-		{
-			continue;
-		}
-
-		PlayerPaintTexture paintTexture = {};
-		paintTexture.meshIndex = meshIndex;
-		if (!copyTextureToCpu(gameplay, materialTextures.albedoTexture, paintTexture.pixels, paintTexture.size, paintTexture.quality))
-		{
-			continue;
-		}
-
-		paintTexture.texture = createPaintTexture(gameplay, paintTexture);
-		materialTextures.albedoTexture = paintTexture.texture;
-		renderer3D.setEntityMeshMaterialTextures(playerEntity, meshIndex, materialTextures);
-		playerPaintTextures.push_back(std::move(paintTexture));
-	}
-
-	renderer3D.setEntityPaintTarget(playerEntity);
+	setupEntityPaintTextures(gameplay, gameplay.playerEntity, gameplay.playerPaintTextures, true);
 }
 
 void updatePaintBrushSize(ClientGameplay &gameplay, const platform::Input &input)
@@ -1154,7 +1543,7 @@ void updateThirdPersonCamera(ClientGameplay &gameplay)
 	renderer3D.camera.position = target - cameraForward * thirdPersonCameraDistance;
 }
 
-bool ClientGameplay::init()
+bool ClientGameplay::init(const char *serverAddress)
 {
 	cameraMode = CameraMode::Free;
 	thirdPersonYaw = 0.0f;
@@ -1172,6 +1561,21 @@ bool ClientGameplay::init()
 	paintDebugState = {};
 	hasLastPaintStrokeScreenPosition = false;
 	lastPaintStrokeScreenPosition = {};
+	localAnimationIndex = 9;
+	timeSinceLastUnreliablePlayerStateSent = 0.0f;
+	timeSinceLastReliablePlayerStateSent = 0.0f;
+	hasLastSentPlayerState = false;
+	lastSentPlayerState = {};
+	clientNetworking.remotePlayers.clear();
+	clientNetworking.remotePaintUpdates.clear();
+	timeSinceLastPaintTextureSync = 0.0f;
+	localPaintTexturesDirty = false;
+	clearRemotePlayers(*this);
+
+	if (!clientNetworking.connectToServer(serverAddress))
+	{
+		return false;
+	}
 
 #pragma region init stuff
 	platform::showMouse(false);
@@ -1188,6 +1592,7 @@ bool ClientGameplay::init()
 
 	if (!playerPhysics.init())
 	{
+		clientNetworking.shutdown();
 		return false;
 	}
 
@@ -1242,6 +1647,7 @@ bool ClientGameplay::update(float deltaTime, platform::Input &input, gl2d::Rende
 	const int h = platform::getFrameBufferSizeY();
 #pragma endregion
 
+	clientNetworking.update();
 	renderer3D.updateWindowMetrics(w, h);
 
 	if (platform::isButtonPressed(platform::Button::Tab))
@@ -1260,6 +1666,7 @@ bool ClientGameplay::update(float deltaTime, platform::Input &input, gl2d::Rende
 
 	updatePaintColorPicker(*this, input);
 	updatePaintBrushSize(*this, input);
+	updateLocalAnimationSelection(*this);
 
 	const bool captureMouseLook = cameraMode == CameraMode::Free || !paintModeActive;
 	static glm::vec2 lastMousePosition = {};
@@ -1299,6 +1706,10 @@ bool ClientGameplay::update(float deltaTime, platform::Input &input, gl2d::Rende
 
 	playerPhysics.update(deltaTime, playerInput);
 	syncPlayerEntityToPhysics(*this);
+	const int currentAnimationIndex = getCurrentLocalAnimationIndex(*this, playerInput);
+	renderer3D.setEntityAnimationIndex(playerEntity, currentAnimationIndex);
+	sendLocalPlayerState(*this, deltaTime, currentAnimationIndex);
+	syncRemotePlayers(*this, deltaTime);
 
 	if (cameraMode == CameraMode::ThirdPerson)
 	{
@@ -1308,6 +1719,7 @@ bool ClientGameplay::update(float deltaTime, platform::Input &input, gl2d::Rende
 	renderer3D.render(deltaTime);
 	pickPaintColorFromScreen(*this, input);
 	paintPlayerFromCursor(*this, input);
+	sendLocalPaintTextures(*this, deltaTime);
 	renderPaintBrushOverlay(*this, input, renderer);
 	renderPaintColorPicker(*this, renderer, paintUiFont);
 
@@ -1328,9 +1740,8 @@ bool ClientGameplay::update(float deltaTime, platform::Input &input, gl2d::Rende
 		ImGui::PushMakeWindowNotTransparent();
 		ImGui::Begin("Tweaks");
 
-		static int animation = 9;
-		ImGui::SliderInt("Animation", &animation, 0, PLAYER_ANIMATIONS - 1);
-		renderer3D.setEntityAnimationIndex(playerEntity, animation);
+		ImGui::SliderInt("Animation", &localAnimationIndex, 0, PLAYER_ANIMATIONS - 1);
+		ImGui::Text("Anim cycle: Q previous / E next");
 		ImGui::Text("Camera: %s", cameraMode == CameraMode::Free ? "Free" : "Third-Person");
 		if (ImGui::Button(cameraMode == CameraMode::Free ? "Switch to Third-Person (Tab)" : "Switch to Free Camera (Tab)"))
 		{
@@ -1373,6 +1784,13 @@ bool ClientGameplay::update(float deltaTime, platform::Input &input, gl2d::Rende
 		ImGui::Text("Third-person zoom: Mouse wheel (%.1f)", thirdPersonCameraDistance);
 		ImGui::Text("Grounded: %s", playerPhysics.isGrounded() ? "Yes" : "No");
 		ImGui::Text("Wall attached: %s", playerPhysics.isWallAttached() ? "Yes" : "No");
+		ImGui::Separator();
+		ImGui::Text("Net state: %s", clientNetworking.getConnectionStateName());
+		ImGui::Text("Server IP: %s", clientNetworking.connectedServerAddress.c_str());
+		ImGui::Text("Net status: %s", clientNetworking.lastStatus.c_str());
+		ImGui::Text("Received player data: %s", clientNetworking.receivedPlayerData ? "Yes" : "No");
+		ImGui::Text("Local CID: %llu", static_cast<unsigned long long>(clientNetworking.localCID));
+		ImGui::Text("Remote players: %d", static_cast<int>(remotePlayers.size()));
 
 		ImGui::PopMakeWindowNotTransparent();
 		ImGui::End();
@@ -1383,6 +1801,8 @@ bool ClientGameplay::update(float deltaTime, platform::Input &input, gl2d::Rende
 
 void ClientGameplay::shutdown()
 {
-
+	clearPaintTextures(*this, playerPaintTextures);
+	clearRemotePlayers(*this);
+	clientNetworking.shutdown();
 	playerPhysics.shutdown();
 }

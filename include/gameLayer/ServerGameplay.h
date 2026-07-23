@@ -8,7 +8,7 @@ struct ServerGameplay
 
 	ENetHost *server = nullptr;
 
-	void init();
+	bool init();
 
 	void update();
 
@@ -20,7 +20,11 @@ struct ServerGameplay
 	
 	void removeConnection(ENetEvent& event);
 
+	void broadcastPacketToOtherClients(ENetPeer *sourcePeer, Packet packet,
+		const char *data, size_t size, bool reliable, int channel);
+
 	std::uint64_t getIdAndIncrement();
 
 	std::uint64_t playerIDs = 1;
+	std::uint32_t connectedClients = 0;
 };

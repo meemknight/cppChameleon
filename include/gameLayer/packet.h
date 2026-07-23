@@ -1,11 +1,14 @@
 #pragma once
 #include <cstdint>
 #include <enet/enet.h>
+#include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
 
-#define SERVER_CHANNELS 2
+#define SERVER_CHANNELS 3
 
 #define CHANNEL_CONNECTIONS 0
 #define CHANNEL_GAMEPLAY 1
+#define CHANNEL_PAINTING 2
 
 
 struct Packet
@@ -30,6 +33,9 @@ enum: std::uint32_t
 {
 	headerNone = 0,
 	headerReceiveCIDAndData,
+	headerPlayerStateUpdate,
+	headerPlayerPaintTextureUpdate,
+	headerClientDisconnected,
 
 };
 
@@ -37,6 +43,26 @@ enum: std::uint32_t
 struct Packet_ReceiveCIDAndData
 {
 	std::uint64_t yourCID = 0;
+};
+
+struct Packet_PlayerStateUpdate
+{
+	glm::vec3 position = {};
+	float yaw = 0.0f;
+	std::int32_t animationIndex = 0;
+};
+
+struct Packet_ClientDisconnected
+{
+	std::uint64_t cid = 0;
+};
+
+struct Packet_PlayerPaintTextureUpdate
+{
+	std::int32_t meshIndex = -1;
+	glm::ivec2 size = {};
+	std::int32_t quality = 0;
+	std::uint32_t pixelDataSize = 0;
 };
 
 void *unCompressData(const char *data, size_t compressedSize, size_t &originalSize);

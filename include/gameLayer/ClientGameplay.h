@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ClientNetworking.h"
 #include "PhysicsController.h"
 #include "platformInput.h"
 
@@ -9,6 +10,7 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
+#include <map>
 #include <vector>
 
 struct ClientGameplay
@@ -20,6 +22,7 @@ struct ClientGameplay
 		glm::ivec2 size = {};
 		int quality = gl3d::maxQuality;
 		std::vector<unsigned char> pixels;
+		bool networkDirty = false;
 	};
 
 	enum class CameraMode
@@ -47,7 +50,16 @@ struct ClientGameplay
 		glm::ivec2 framebufferMousePosition = {};
 	};
 
-	bool init();
+	struct RemotePlayerVisual
+	{
+		gl3d::Entity entity = {};
+		glm::vec3 visualPosition = {};
+		float visualYaw = 0.0f;
+		bool hasVisualState = false;
+		std::vector<PlayerPaintTexture> paintTextures;
+	};
+
+	bool init(const char *serverAddress);
 	bool update(float deltaTime, platform::Input &input, gl2d::Renderer2D &renderer, gl2d::Font &paintUiFont);
 	void shutdown();
 
@@ -57,6 +69,8 @@ struct ClientGameplay
 	gl3d::Entity playerEntity;
 	gl3d::Entity mapEntity;
 	PhysicsController playerPhysics;
+	ClientNetworking clientNetworking;
+	std::map<std::uint64_t, RemotePlayerVisual> remotePlayers;
 
 	CameraMode cameraMode = CameraMode::Free;
 	float thirdPersonYaw = 0.0f;
@@ -74,4 +88,11 @@ struct ClientGameplay
 	PaintDebugState paintDebugState;
 	bool hasLastPaintStrokeScreenPosition = false;
 	glm::ivec2 lastPaintStrokeScreenPosition = {};
+	int localAnimationIndex = 9;
+	float timeSinceLastUnreliablePlayerStateSent = 0.0f;
+	float timeSinceLastReliablePlayerStateSent = 0.0f;
+	bool hasLastSentPlayerState = false;
+	Packet_PlayerStateUpdate lastSentPlayerState = {};
+	float timeSinceLastPaintTextureSync = 0.0f;
+	bool localPaintTexturesDirty = false;
 };
